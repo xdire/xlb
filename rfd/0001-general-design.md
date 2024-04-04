@@ -29,20 +29,25 @@ TCP Proxy Load balancer with mTLS can solve the following set of problems:
 
 ## Details
 
-Design will discuss 4 primary areas:
-- High level scheme
-- Component flow
-- Authorization and security scheme
-- Entities
+Design will discuss following areas:
+- [General Structure](#structure)
+- [High Level Components](#components)
+- [Storage](#storage)
+- [Authentication and Credentials](#authentication-and-credential-provision)
+- [Security](#security)
+- [Proto interfaces](#proto-specification)
+- [Audit](#audit-events) and [Observability](#observability)
+- [Product Usage](#product-usage)
+- [Test plan](#test-plan)
 
 ### Structure
-Balancer provides simple rule-based ingress. 
+Balancer provides simple rule-based ingress.
 
-There can be multiple variations of the component connectivity, for the scope
-of this project we will touch Load balancer as an application available on single
-port, with ability to route traffic to provided server pool. 
+There can be multiple variations of the component connectivity for the scope
+of this project, we will touch Load balancer as an application available on a single
+port, with the ability to route traffic to the provided server pool.
 
-LB can be launched on as many ports as requested, and have same characteristics.
+LB can be launched on as many ports as requested and have the same characteristics.
 ```
 ┌──────┐                 ┌───────┐                    ┌─────────────────┐
 │      │                 │    B  │                    │  Customer pool  │
@@ -80,7 +85,7 @@ LB can be launched on as many ports as requested, and have same characteristics.
 
 ### Components
 
-For our implementation we will consider following scheme:
+For our implementation, we will consider the following scheme:
 ```
                                                                                                                    
                 ┌───────────────────────┐   ┌────┐              ┌─────────┐                                        
@@ -119,17 +124,17 @@ object options.
 Frontend Available in Api Interface, and is entity in Storage Abstraction.
 
 #### Backend
-Is the internal abstraction created with Frontend options when Connection Manager receives
+Is the internal abstraction created with Frontend options when the Connection Manager receives
 the request. Backends have the following functionality:
-- Provide routine to pipe the traffic
+- Provide a routine to pipe the traffic
 - Apply routing strategy
 - Manage connection health per pool
 
 #### API Interface
-API type of abstraction, works with the database abstraction and can alter Load Balancer
+API type of abstraction works with the database abstraction and can alter the Load Balancer
 components behavior.
 
-Following methods are to be proposed for the API Interface to fill the scope of this design:
+The following methods are to be proposed for the API Interface to fill the scope of this design:
 
 ---
 `POST` `/api/v1/client` - creates client id and oauth type key
@@ -291,7 +296,7 @@ import "google/protobuf/timestamp.proto";
 
 enum Strategy {
   RoundRobin = 0;
-  LeastConn = 1;
+  LeastConn  = 1;
 }
 
 message Client {
@@ -301,16 +306,22 @@ message Client {
   google.protobuf.Timestamp createdAt = 10;
 }
 
+message AccessToken {
+  string token = 1;
+  int32  expiresIn = 2;
+}
+
 message FrontendTLSData {
   string key = 2;
-  string certificate = 3;
+  string certificate   = 3;
+  string caCertificate = 4;
 }
 
 message Frontend {
   string   uuid     = 1;
   bool     active   = 2;
   Strategy strategy = 3;
-  int32    routeTimeoutSec = 4;
+  int32    routeTimeoutMsec = 4;
   string   clientId  = 5;
   string   accessKey = 6;
   repeated FrontendRoute routes = 8;
@@ -322,9 +333,10 @@ message FrontendRoute {
 }
 
 message Backend {
-  string   uuid     = 1;
-  string   frontend = 2;
-  Strategy strategy = 3;
+  string   uuid       = 1;
+  string   frontendId = 2;
+  Strategy strategy   = 3;
+  repeated BackendRoute routes = 4;
 }
 
 message BackendRoute {
@@ -382,5 +394,4 @@ change the behavior
 For the scope of this design tests will be designed in following areas:
 - Tests for routing strategies to ensure proper operation capabilities and proper concurrency implementation
 - Tests that components follow the context closure
-- Functional+concurrency tests to ensure traffic flows between clients and customer pool
-- 
+- Functional tests with concurrency to ensure traffic flows without issues between clients and customer pool
