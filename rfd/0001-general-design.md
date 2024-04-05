@@ -129,6 +129,14 @@ the request. Backends have the following functionality:
 - Provide a routine to pipe the traffic
 - Apply routing strategy
 - Manage connection health per pool
+- Provide balancing with available algorithms
+
+###### Balancing Algorithms
+This design limits initial implementation to have the following algorithms:
+1) Round Robin
+   - implementation in a form of atomic counter to the size of the pool of servers
+2) Least connection
+   - implementation as a range over the pool of server records with atomically incremented counters
 
 #### API Interface
 API type of abstraction works with the database abstraction and can alter the Load Balancer
@@ -356,7 +364,7 @@ message Frontend {
 }
 
 message FrontendRoute {
-  string dest     = 1;
+  string route    = 1;
   int32  capacity = 3;
 }
 
@@ -369,9 +377,9 @@ message Backend {
 }
 
 message BackendRoute {
-  string route    = 1;
-  int32  sessions = 2;
-  int64  totalSessions = 5;
+  string route       = 1;
+  uint32 connections = 2;
+  uint64 statistics  = 5;
 }
 ```
 
