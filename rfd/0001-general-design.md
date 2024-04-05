@@ -255,7 +255,28 @@ ephemeral in context of multiple-replicas — we can lose replicas and create ne
 #### Client Service mTLS Layer
 Our mTLS layer consists of the following scheme:
 ```
-scheme here
+                                                                    ╔════════════╗
+                                                      ┌─────────────╣ Connection ╠─────────────┐
+                                                      │             ║  manager   ║             │
+                                                      │             ╚════════════╝             │
+                                                      │                                        │
+┌──────────┐                                          │       ┌───────────────┐                │
+│          │                                       ┌──┼──────▶│  Accept Cert  │                │
+│  CACert  │───────┐        ┌────────────┐         │  │       └───────┬───────┘                │
+│          │       │        │            │         │  │               │                        │
+└──────────┘  ┌────┴──┐     │   Client   │  ┌──────┴┐ │       ┌───────▼───────┐                │
+              │Produce│     │    Cert    ├──┤Connect│ │       │  Fetch CN     │                │
+┌──────────┐  │  TLS  ├────▶│            │  └───────┘ │       └───────────────┘                │
+│  Client  │  └────┬──┘     │ CN=FeAcKey │            │               │                        │
+│ Frontend │       │        │            │            │       ┌───────┘                        │
+│  Access  │───────┘        └────────────┘            │       │                                │
+│    key   │                                         ┌┴───────▼───────┐                        │
+└──────────┘                                         │ Lookup Access  │    ┌─────────────────┐ │
+                                                     │  Key in Cache  │    │  Dispatch to    │ │
+                                                     │  of available  │────▶ correct Backend │ │
+                                                     │ customer pools │    └─────────────────┘ │
+                                                     └┬───────────────┘                        │
+                                                      └────────────────────────────────────────┘
 ```
 ###### Scope 
 For the scope of the project and simplicity of initial implementation we consider following:
@@ -299,6 +320,7 @@ enum Strategy {
   LeastConn  = 1;
 }
 
+// API to manage client data
 message Client {
   string uuid = 1;
   string key  = 2;
@@ -306,17 +328,20 @@ message Client {
   google.protobuf.Timestamp createdAt = 10;
 }
 
+// API to fetch the token
 message AccessToken {
   string token = 1;
   int32  expiresIn = 2;
 }
 
+// API to fetch the TLS credentials
 message FrontendTLSData {
   string key = 2;
   string certificate   = 3;
   string caCertificate = 4;
 }
 
+// API to manage Frontend information and status
 message Frontend {
   string   uuid     = 1;
   bool     active   = 2;
@@ -332,6 +357,7 @@ message FrontendRoute {
   int32  capacity = 3;
 }
 
+// If we provide API to see current backend snapshot
 message Backend {
   string   uuid       = 1;
   string   frontendId = 2;
