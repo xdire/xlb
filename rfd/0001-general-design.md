@@ -253,7 +253,7 @@ provided by external application which then uses APIs mentioned in this design d
 session
 - Client operates JWT AccessToken for the rest of configuration session
 ###### Considerations
-> `/api/v1/client/auth` can experience attacks where ClientID can try to be identified 
+> `/api/v1/client/auth` can experience bruteforce attacks
 - **Mitigation**: Auth API can be Throttled per IP basis to 10 rps, as this API 
 should not provide capabilities for rapid traffic increases
 - **Security**: Both ClientId and ClientKey should have enough entropy in a combination
@@ -264,7 +264,7 @@ selector capabilities to route the traffic for those records
 ephemeral in context of multiple-replicas — we can lose replicas and create new replicas on the go
 
 #### Client Service mTLS Layer
-Our mTLS layer consists of the following scheme:
+Proposed mTLS layer consists of the following scheme:
 ```
                                                                     ╔════════════╗
                                                       ┌─────────────╣ Connection ╠─────────────┐
@@ -379,7 +379,6 @@ message Backend {
 message BackendRoute {
   string route       = 1;
   uint32 connections = 2;
-  uint64 statistics  = 5;
 }
 ```
 
