@@ -161,6 +161,9 @@ properties, will update frontend and can remove it from being scheduled by conne
 `GET` `/api/v1/frontend/list` - requires token, gives back list of frontends which belongs to the client
 
 ---
+`DELETE` `/api/v1/frontend/{uuid}` - requires token, will remove frontend from the dispatch and storage
+
+---
 
 ### Storage
 Provides persistence for the application entities using some storage backend, examples:
