@@ -25,243 +25,222 @@ TCP Proxy Load balancer with mTLS can solve the following set of problems:
 - Distribute the load for the domain record using the ruleset enforced by the customer
 - Serve as a secure communications Gateway pass-through for the network of services
 - Provide access management per client resource scope
-- Provide ingress statistics and observability for customer network
 
 ## Details
 
 Design will discuss following areas:
 - [General Structure](#structure)
-- [High Level Components](#components)
-- [Storage](#storage)
+- [Components](#components)
+- [Rate Limiter](#rate-limiter)
 - [Authentication and Credentials](#authentication-and-credential-provision)
-- [Security](#security)
-- [Proto interfaces](#proto-specification)
-- [Audit](#audit-events) and [Observability](#observability)
-- [Product Usage](#product-usage)
-- [Test plan](#test-plan)
+- [Security](#security-authentication-and-credential-provision)
 
-### Structure
-Balancer provides simple rule-based ingress.
+## Structure
+Balancer provides following components in order of flow and appearance:
 
-There can be multiple variations of the component connectivity for the scope
-of this project, we will touch Load balancer as an application available on a single
-port, with the ability to route traffic to the provided server pool.
-
-LB can be launched on as many ports as requested and have the same characteristics.
+1) Rate Limiting System
+    - Per Resource Token Bucket based Rate Limiter
+    - Per LB — LRU TTL Rate Limiter
+2) Resource Cache
+    - map of customer pool records
+3) Forwarder — backend entity providing management per customer pool
+    - allows selection of the strategy (if supported more than single)
+    - provides health check host tracker per pool
+    - provides ability to add to the pool or remove from the pool
 ```
-┌──────┐                 ┌───────┐                    ┌─────────────────┐
-│      │                 │    B  │                    │  Customer pool  │
-│Client│─────┐           │    A  │                    │  ┌──────────┐   │
-│      │     │           │  L L  │      ┌─────────┬───┴──┤ Service  │   │
-└──────┘  ┌──┴────▶─┬────┴┐ O A  │  ┌──▶│ .10.151 │ 9090 │ Instance │   │
-┌──────┐  │ app1.d.c│ 8080│ A N  ├──┤   └─────────┴───┬──┴──────────┘   │
-│      │  └──┬────▶─┴────┬┘ D C  │  │                 │  ┌──────────┐   │
-│Client│─────┘           │    E  │  │   ┌─────────┬───┴──┤ Service  │   │
-│      │                 │    R  │  ├──▶│ .10.152 │ 9090 │ Instance │   │
-└──────┘                 └───────┘  │   └─────────┴───┬──┴──────────┘   │
-                                    │                 │  ┌──────────┐   │
-┌──────┐                 ┌───────┐  │   ┌─────────┬───┴──┤ Service  │   │
-│      │  ┌─────────┬────┴┐   B  │  ├──▶│ .10.153 │ 9090 │ Instance │   │
-│Client│──▶ app1.d.c│ 8080│   A  ├──┘   └─────────┴───┬──┴──────────┘   │
-│      │  └─────────┴────┬┘ L L  │                    └─────────────────┘
-└──────┘                 │  O A  │
-┌──────┐                 │  A N  │
-│      │  ┌─────────┬────┴┐ D C  │                    ┌─────────────────┐
-│Client├─▶│ svc3.x.c│ 8081│   E  ├──┐                 │  Customer pool  │
-│      │  └─────────┴────┬┘   R  │  │                 │  ┌──────────┐   │
-└──────┘                 └───────┘  │   ┌─────────┬───┴──┤ Service  │   │
-                                    ├──▶│ .72.91  │ 50051│ Instance │   │
-┌──────┐                 ┌───────┐  │   └─────────┴───┬──┴──────────┘   │
-│      │                 │    B  │  │                 │  ┌──────────┐   │
-│Client│────┐            │    A  │  │   ┌─────────┬───┴──┤ Service  │   │
-│      │    │            │  L L  │  │┌──▶ .72.92  │ 50051│ Instance │   │
-└──────┘  ┌─┴───▶───┬────┴┐ O A  │  ││  └─────────┴───┬──┴──────────┘   │
-┌──────┐  │ svc3.x.c│ 8081│ A N  │──┴┤                │  ┌──────────┐   │
-│      │  └─┬───▶───┴────┬┘ D C  │   │  ┌─────────┬───┴──┤ Service  │   │
-│Client│────┘            │    E  │   └──▶ .72.93  │ 50051│ Instance │   │
-│      │                 │    R  │      └─────────┴───┬──┴──────────┘   │
-└──────┘                 └───────┘                    └─────────────────┘
+     ┌────────────────┐    ┌──────────┐   ┌───────────┐                       ┌──────────┐            ┌──────────┐
+     │   IP LRU TTL   │    │ Resource │   │  Resource │                       │ Healthy  │            │ No error │
+     │Rate Limit Check│    │  lookup  ├───▶   cache   │                       │  found   ├─────┐      │          │
+     └────────────────┘    └─────▲────┘   └─────┬─────┘                       └────▲─────┘     │      └────▲─────┤
+              ▲                  │              │                                  │           │           │     │
+              │                  │              │                                  │           │           │     └────┐
+              │                 ╱█╲             │                                 ╱█╲          │          ╱█╲         │
+              └──────────┐     ╱███╲            │                                ╱███╲         │         ╱███╲        │
+                         │    ╱█████╲           │                               ╱█████╲        │        ╱█████╲       │
+                         │   ╱███████╲     ┌────▼────┐   ┌───────────┐         ╱███████╲       │       ╱███████╲      │
+   ┌─────────┐  ┌─────┐  │  ╱█████████╲    │  Rate   │   │           │        ╱█████████╲      └──────▶█████████╲   ┌─▼───────┐
+───▶ Request ├──▶ TLS │──┴─▶█HANDSHAKE█▏   │ limiter ├───▶ Forwarder ├───────▶█STRATEGY██▏           ▕█DIAL HOST█▏  │ Connect │
+   └─────▲───┘  │ port│     ╲█████████╱    │  check  │   │           │        ╲█████████╱             ╲█████████╱   │ streams │
+         │      └─────┘      ╲███████╱     └─────────┘   │           │         ╲███████▲       .─.     ╲███████╱    └─────────┘
+         │                    ╲█████╱                    │  ┌─────┐  │    ┌───────████╱│ ┌────( 2 )     ╲█████╱
+         │                     ╲███╱                     │┌─┤Cache├─┐│  ┌─┴──┐   ╲███╱ │ │ Ask `┬'       ╲███╱
+         │                      ╲█╱                      ││ └─────┘ ◀┼──┤Peek│    ╲█╱  └─┤ next │         ╲█╱
+         │                    ┌────┐                     ││┌───────┐││  └────┘     │     │ host │          │
+         │                    │Fail│                     │││ Route │││             │     └┬─────┘          │
+         │                    └──┬─┘                     ││└───────┘││             │      │      .─.       │
+         │                       │                       ││┌───────┐││             │    ┌─┴─────( 1 ) ┌────▼─────┐
+         │                       │                       │││ Route │││             │    │  Mark  `┬'  │   Error  │
+         │                       │                       ││└───────┘◀┼─────────────┼────┤unhealthy◀───┤          │
+         │                       ▼                       ││┌───────┐││             │    └─────────┘   └──────────┘
+         │                ┌────────────┐                 │││ Route │││             │
+         │                │ IP LRU TTL │                 ││└───────┘││             │
+         │                │Rate Limiter│                 │└─────────┘│        ┌────▼─────┐
+         │                │ Add Record │                 └───────────┘        │ Unhealthy│
+         │                └────────────┘                                      │   only   │
+    ┌────┴────┐                  │             ┌──────────────────────────────┴──────────┘
+    │  Close  │◀─────────────────┼─────────────┘
+    └─────────┘                  │
+         ▲                       │
+         │                       │
+         └───────────────────────┘
 ```
 
-### Components
+## Components
 
-For our implementation, we will consider the following scheme:
+### Forwarder
 ```
-                                                                                                                   
-                ┌───────────────────────┐   ┌────┐              ┌─────────┐                                        
-           ┌───▶│     API INTERFACE     │───┤CRUD├────┐    ┌────┤ options ├────┐                                   
-         ┌─┴─┐  └───────────────────────┘   └────┘    │    │┌───┴─────────┴───┐│  ┌──────┐                         
-         │ C │                                        ▼ ┌──□│addr1,addr2,addr3││  │      │            ┌─────────┐  
-         │ O │                                     ┌────┴┬─│├─────────────────┤│──┘      ▼         ┌──┤Customer ├─┐
-         │ N │                                     │  F  │ ││   timeoutSec    ││      ┌─────┐      │  │  Pool   │ │
-         │ F │                                     │  R  │ │└─────────────────┘│      │  B  │      │  └─────────┘ │
-         │ I │                                     │  O  │ └───────────────────┘      │  A  │      │              │
-         │ G │       ┌─────────┐           ┌────┐  │  N  │                            │  C  │      │  ┌────────┐  │
-         │ U │     ┌─┤Request 1├─┐      ┌──┤ R1 ├─▶│  T  │                            │  K  │────┬─┼─▶│  addr1 │  │
-         │ R │     │ └─────────┘ │      │  └────┘  │  E  │                            │  E  │    │ │  └────────┘  │
-         │ E │     │             │      │          │  N  │                            │  N  │    │ │  ┌────────┐  │
-         └─┬─┘┌────────┐         ▼      │          │  D  ├────────────────────────────▶  D  │    ├─┼──▶  addr2 │  │
-           │  │        │     ┌──────┬──────┐       └─────┘                            └─────┘    │ │  └────────┘  │
-           └──│ Client │     │ 8090 │ mTLS │                                                     │ │  ┌────────┐  │
-              │        │     └──────┴──────┘       ┌─────┐                            ┌─────┐    └─┼─▶│  addr3 │  │
-              └────────┘         │      │          │  F  │                            │  B  │      │  └────────┘  │
-                   │             │      │          │  R  ├────────────────────────────▶  A  │      │  ┌────────┐  │
-                   │ ┌─────────┐ │      │          │  O  │                            │  C  │    ┌─┼─▶│  addr4 │  │
-                   └─┤Request 2├─┘      │  ┌────┐  │  N  │                            │  K  │────┤ │  └────────┘  │
-                     └─────────┘        └──┤ R2 ├─▶│  T  │      ┌─────────┐           │  E  │    │ │  ┌────────┐  │
-                                           └────┘  │  E  │ ┌────┤ options ├────┐      │  N  │    └─┼─▶│  addrN │  │
-                                                   │  N  │ │┌───┴─────────┴───┐│      │  D  │      │  └────────┘  │
-                                                   │  D  │ ││addr4,addr5,addrN││      └─────┘      │              │
-                                                   └────┬┴─│├─────────────────┤│──┐      ▲         └──────────────┘
-                                                        └──□│   timeoutSec    ││  │      │                         
-                                                           │└─────────────────┘│  └──────┘                         
-                                                           └───────────────────┘                                   
+                               ┌───────────────────┐
+┌──────────────────────────────┤Forwarder Selector ├──────────────────────────────┐
+│                              └───────────────────┘                              │
+│                                  ┌───────────┐                                  │
+│         ┌────────────────────────┤   Slice   ├────────────────────────┐         │
+│         │                        └───────────┘                        │         │
+│         │     ┌───────┐            ┌───────┐            ┌───────┐     │         │
+│         │ ┌───┤*Route ├───┐    ┌───┤*Route ├───┐    ┌───┤*Route ├───┐ │         │
+│         │ │   └───────┘   │    │   └───────┘   │    │   └───────┘   │ │         │
+│         │ │┌─────────────┐│    │┌─────────────┐│    │┌─────────────┐│ │         │
+│         │ ││   Address   ││    ││   Address   ││    ││   Address   ││ │         │
+│         │ │└─────────────┘│    │└─────────────┘│    │└─────────────┘│ │         │
+│         │ │┌─────────────┐│    │┌─────────────┐│    │┌─────────────┐│ │         │
+│ ┌───────┼─▶│   Healthy   ││    ││   Healthy   ││    ││   Healthy   │◀─┼─────┐   │
+│ │       │ │└─────────────┘│    │└─────────────┘│    │└─────────────┘│ │     │   │
+│ │       │ │┌─────────────┐│    │┌─────────────┐│    │┌─────────────┐│ │     │   │
+│ ├───────┼─▶│ Connections ││    ││ Connections ││    ││ Connections ││ │     │   │
+│┌┴┐      │ │└─────────────┘│    │└─────────────┘│    │└─────────────┘│ │    ┌┴┐  │
+││A│      │ │┌─────────────┐│    │┌─────────────┐│    │┌─────────────┐│ │    │A│  │
+││T├──────┼─▶│   Active    ││    ││   Active    ││    ││   Active    │◀─┼────┤T│  │
+││O│      │ │└─────────────┘│    │└─────────────┘│    │└─────────────┘│ │    │O│  │
+││M│      │ └───────────────┘    └───────────────┘    └───────────────┘ │    │M│  │
+││I│      │                                                             │    │I│  │
+││C│      └─────────────────────────────▲───────────────────────────────┘    │C│  │
+│└┬┘                              ┌─────┴──────┐                             └┬┘  │
+│ │  ┌──────────────┐             │Mark !Active│          ┌────────────────┐  │   │
+│ │  │              │             │ Append new │          │                │  │   │
+│ └──│   Strategy   │             └─────┬──────┘       ┌─▶│ Health-watcher │──┘   │
+│    │              │              ┌────┴─────┐        │  │                │      │
+│    └──────────────┴────┐         │  Update  │        │  └────────────────┘      │
+│                      ╔═╩════╦────▶   Mutex  │        │      ┌─────────┐         │
+│                      ║ Each ║    └────▲─────┘        │      │   Add   │         │
+│                      ║Next()║         │              └──────┤  Route  │         │
+│                      ╚══════╝         │                     └─────────┘         │
+└───────────────────────────────────────┼─────────────────────────────────────────┘
+                                   ┌────┴────┐
+                                   │ Update  │
+                                   │ Routes  │
+                                   └─────────┘ 
 ```
-#### Frontend
-Is the part of the application customer can configure, and it represents Load Balancer
-object options.
+Forwarder provides the reference to the slice of `[]*Route`.
 
-Frontend Available in Api Interface, and is entity in Storage Abstraction.
+#### Property updates
+Both `Strategy` and `Health-Watcher` can use the slice and use `atomics` to update
+each `*Route` individually.
 
-#### Backend
-Is the internal abstraction created with Frontend options when the Connection Manager receives
-the request. Backends have the following functionality:
-- Provide a routine to pipe the traffic
-- Apply routing strategy
-- Manage connection health per pool
-- Provide balancing with available algorithms
+#### Pool updates
+In case if `[]*Route` should change Forwarder will block on the `Update Mutex` adding to the
+slice and marking entities that should be removed as inactive (as they still can be in reference
+with the strategy which will block only on Next() entry).
 
-###### Balancing Algorithms
-This design limits initial implementation to have the following algorithms:
-1) Round Robin
-   - implementation in a form of atomic counter to the size of the pool of servers
-2) Least connection
-   - implementation as a range over the pool of server records with atomically incremented counters
+Updates are rare, this design does not target additional optimizations.
 
-#### API Interface
-API type of abstraction works with the database abstraction and can alter the Load Balancer
-components behavior.
+#### Strategy Next()
+Strategy will use the current reference for provide the selection mechanics as a forward iteration loop.
 
-The following methods are to be proposed for the API Interface to fill the scope of this design:
-
----
-`POST` `/api/v1/client` - creates client id and oauth type key
-
----
-`POST` `/api/v1/client/auth` - authenticates client with **Basic** Authorization, gives back AccessToken
-
----
-`POST` `/api/v1/frontend` - requires token and frontend object, creates frontend object 
-and dispatches it to connection manager
-
----
-`GET` `/api/v1/frontend/{uuid}/tls` - requires token and frontend UUID to provision the certificate authority
-for the client devices
-
----
-`PATCH` `/api/v1/frontend/{uuid}` - requires token, frontend UUID and frontend object with updated
-properties, will update frontend and can remove it from being scheduled by connection manager
-
----
-`GET` `/api/v1/frontend/{uuid}` - requires token, frontend UUID, provides back frontend object
-
----
-`GET` `/api/v1/frontend/list` - requires token, gives back list of frontends which belongs to the client
-
----
-`DELETE` `/api/v1/frontend/{uuid}` - requires token, will remove frontend from the dispatch and storage
-
----
-
-### Storage
-Provides persistence for the application entities using some storage backend, examples:
-- `In Memory Backend`: suitable for testing application
-- `Key-Val file storage`: suitable for running application on a single machine or for testing
-- `Cloud database`: suitable for running multiple replicas of the application with centralized storage
-
-Can be represented at minimal as following interface:
+Strategy will block `updateMutex` on `Next()` but in following way:
 ```go
-type IStorageBackend interface {
-	Init(ctx context.Context, opt IStorageOptions) error
-	Close() error
-	CreateClient(name string) (*entity.Client, error)
-	GetClient(uuid string) (*entity.Client, error)
-	CreateFrontend(opt *entity.Frontend) (*entity.Frontend, error)
-	GetFrontend(uuid string) (*entity.Frontend, error)
-	UpdateFrontend(uuid string, opt *entity.Frontend) error
-	DeleteFrontend(uuid string) error
-	CreateFrontendTLS(frontendUuid, clientUuid string) (*entity.FrontendTLSData, error)
-	ListFrontend(clientUuid string, onlyActive bool) ([]*entity.Frontend, error)
+func (s Strategy) Next() *Route {
+	s.fwd.updateMutex.Lock()
+	s.fwd.updateMutex.Unlock()
+	// ... rest of the code
+	// range s.fwd.Routes
 }
 ```
-Entity description can be found in [Proto](#proto-specification) section
+This will adjust behavior to not pick the stale `[]*Route` if Update Routes started
+to mark the entries and replacing the slice reference.
 
-### Authentication and credential provision
-Authentication and provision flow can be represented as a following scheme:
-```
-                                                                                       
-                                                       ┌─────────────────┬─────┬─────┐ 
-            ┌─────────────────────────────────────────▶│ Create ClientID │     │     │ 
-            │                                          └─────────────────┤     │     │ 
-            │                                                            │     │     │ 
-            │                     ┌─────────────────────┐                │     │     │ 
-            │                     │ Receive Id and Key  ╠════════════════╣     │     │ 
-      ┌──────────┐                └──────────╦──────────┘                │     │     │ 
-      │          │◀══════════════════════════╝                           │     │     │ 
-      │          │                                                       │     │     │ 
-      │          │         ┌────────────┐              ┌─────────────────┤     │     │ 
-      │          ├─────────┤Basic Id:Key├─────────────▶│ Get Access Token│  H  │  A  │ 
-      │          │         └────────────┘              └─────────────────┤  T  │  P  │ 
-      │          │                  ┌────────────────────┐               │  T  │  I  │ 
-      │          ◀══════════════════╣ Receive JWT Token  │               │  P  │     │ 
-      │          │                  └────────────────────╩═══════════════╣  S  │  I  │ 
-      │          │                                                       │     │  N  │ 
-      │          │         ┌────────────┐              ┌─────────────────┤  S  │  T  │ 
-      │          ├─────────┤ Bearer JWT ├─────────────▶│ Create Frontend │  E  │  E  │ 
-      │          │         └────────────┘              └─────────────────┤  R  │  R  │ 
-      │          │                                                       │  V  │  F  │ 
-      │ Customer ◀════════════╦─────────────────────────┐                │  E  │  A  │ 
-      │          │            │ Receive Frontend Object ╠════════════════╣  R  │  C  │ 
-      │          │            └─────────────────────────┘                │     │  E  │ 
-      │          │                                                       │     │     │ 
-      │          │         ┌────────────┐    ┌───────────────────────────┤     │     │ 
-      │          ├─────────┤ Bearer JWT ├───▶│ Get Frontend Cert and Key │     │     │ 
-      │          │         └────────────┘    └───────────────────────────┤     │     │ 
-      │          │                                                       │     │     │ 
-      │          │           ┌──────────────────────────────────┐        │     │     │ 
-      │          ◀═══════════╣  Receive B64 Cert, Key, CACert   ╠════════╣     │     │ 
-      │          │           └──────────────────────────────────┘        └─────┴─────┘ 
-      │          │                                                                     
-      │          │                                                                     
-      │          │                                                                     
-      └──────────┘                                                                     
-            │                         ┌────────────┐                                   
-            │                         │            │                                   
-            │     ┌───────────┐       │  Customer  │       ┌─────┐       ┌────────────┐
-            └─────┤Cert,Key,CA├──────▶│  Service   │───────┤ TLS ├──────▶│  TCP PORT  │
-                  └───────────┘       │            │       └─────┘       └────────────┘
-                                      └────────────┘                                   
-```
-### Security
-Security for the application mainly presented as two sections:
+However, it will try to use the stale list once if it was fetched before Update Routes happened.
 
-#### Client API and Signed JWT AccessToken
-###### Flow
-- (out of scope) Client uses HTTPS Access to create account with SSO, flow should be 
-provided by external application which then uses APIs mentioned in this design document
-- Client uses HTTPS Access to provision ClientID and Key (Application) once per configuration
-session
-- Client operates JWT AccessToken for the rest of configuration session
-###### Considerations
-> `/api/v1/client/auth` can experience bruteforce attacks
-- **Mitigation**: Auth API can be Throttled per IP basis to 10 rps, as this API 
-should not provide capabilities for rapid traffic increases
-- **Security**: Both ClientId and ClientKey should have enough entropy in a combination
-- **Stolen credentials**: Client record can be disabled and this should trigger all the 
-Frontend records belonging to the customer change their Access Key which will invalidate
-selector capabilities to route the traffic for those records
-- **DDoS**: As we scale balancer using the centralized storage, and balancer considered to be
-ephemeral in context of multiple-replicas — we can lose replicas and create new replicas on the go
+### Rate Limiter
+
+###### Per-session: When TLS Handshake happened and session got authorization
+In this path we provide a Token bucket for each customer pool resource, which will
+provide the sliding window for the authorized sessions
+
+###### Per IP address: When TLS Handshake failed 
+As we must address possibly super-large chunk of IP data to store in memory, in the scope
+of this library (not distributed) we will provide LRU TTL cache of size, which will update
+and purge while being called for the records. 
+
+1) Before TLS Handshake — we will peek in the cache to see if we should perform TLS at all
+2) After TLS Handshake failed — we will put record in the cache
+```
+     ┌───────────┐
+┌────┤Authorized ├────┐                         ┌───────────────┐
+│    └───────────┘    │          ┌──────────────┤ Token Bucket  ├─────────────────┐
+│                     │          │              └───────────────┘  ┌────────┐     │
+│  ┌──────────────┐   │ ┌─────┐  │                              ┌──┤ Params ├──┐  │
+│  │ Route Pool 1 │───┼─┤Has 1├──▶                              │  └────────┘  │  │
+│  └──────────────┘   │ └─────┘  │  ┌─┐                         │CAP:10  TOK:10│  │
+│                     │          │  │0│   ─┬─                   ├──────────────┤  │
+│  ┌──────────────┐   │ ┌─────┐  │  │ │    │  ┌──┬──┬──┐        ├──────────────┤  │
+│  │ Route Pool 2 │───┼─┤Has 1├──▶  │1│    │  │R1│R2│R3│        │-3      TOK:7 │  │
+│  └──────────────┘   │ └─────┘  │  │ │    │  └──┴──┴──┘        ├──────────────┤  │
+│                     │          │  │2│    │                    │ 0      TOK:7 │  │
+│  ┌──────────────┐   │ ┌─────┐  │  │ │    │  ┌──┬──┬──┬──┐     ├──────────────┤  │
+│  │ Route Pool N │───┼─┤Has 1├──▶  │3│    │  │R4│R5│R6│R7│     │+1 -4   TOK:3 │  │
+│  └──────────────┘   │ └─────┘  │  │ │    │  ├──┼──┼──┼──┤ ┌──┐├──────────────┤  │
+└─────────────────────┘          │  │4│ ┌─┐│  │R8│R9│R0│R1│ │XX││+1 -4   TOK:0 │  │
+                                 │  │ │ │ ││  ├──┼──┼──┼──┘ └──┘├──────────────┤  │
+                                 │  │5│ │ ││  │R2│XX│XX│        │+1 -1   TOK:0 │  │
+                                 │  │ │ │T││  ├──┼──┼──┼──┐     ├──────────────┤  │
+                                 │  │6│ │I││  │R3│XX│XX│XX│     │+1 -1   TOK:0 │  │
+                                 │  │ │ │M││  ├──┼──┼──┼──┤     ├──────────────┤  │
+                                 │  │7│ │E││  │R4│XX│XX│XX│     │+1 -1   TOK:0 │  │
+                                 │  │ │ │ ││  └──┴──┴──┴──┘     ├──────────────┤  │
+                                 │  │8│ │ ││                    │ 0      TOK:0 │  │
+                                 │  │ │ └─┘│                    ├──────────────┤  │
+                                 │  │9│    │                    │ 0      TOK:0 │  │
+                                 │  │ │    │                    ├──────────────┤  │
+                                 │  │0│   ─┼─                   │ 0      TOK:0 │  │
+                                 │  │ │    │  ┌──┬──┬──┐        ├──────────────┤  │
+                                 │  │1│    │  │R4│R5│R6│        │+4 -3   TOK:1 │  │
+                                 │  │ │    │  ├──┼──┴──┘        ├──────────────┤  │
+                                 │  │2│    │  │R7│              │+1 -1   TOK:1 │  │
+                                 │  └─┘    │  └──┘              └──────────────┘  │
+                                 │         ▼                                      │
+                                 └────────────────────────────────────────────────┘
+
+
+
+    ┌────────────┐
+┌───┤Unauthorized├───┐              ┌──────────────┐
+│   └────────────┘   │              │ Not In Cache │───┐
+│                    │              └──────────────┘   │      ┌─────────────────┐
+│      ┌──────┐      │                     Λ           │  ┌───┤  LRU+TTL CACHE  ├───┐
+│      │ IP 1 │──────┼────┐               ╱ ╲          │  │   └─────────────────┘   │
+│      └──────┘      │    │              ╱   ╲         └──┼▶──────┬────┬──────────┐ │
+│      ┌──────┐      │    │             ╱     ╲           ││IPADDR│ 1  │*time.Time│ │
+│      │ IP 2 │──────┼────┤            ╱       ╲          │├──────┼────┼──────────┤ │
+│      └──────┘      │    ├───────────▶ Check   ▏         ││IPADDR│ 4  │*time.Time│ │
+│      ┌──────┐      │    │            ╲ Cache ╱          │├──────┼────┼──────────┤ │
+│      │ IP 3 │──────┼────┤             ╲     ╱           ││IPADDR│ 5  │*time.Time│ │
+│      └──────┘      │    │              ╲   ╱            │└──────┴─▲──┴──────────┘ │
+│      ┌──────┐      │    │               ╲ ╱             │    ┌────┘               │
+│      │ IP N │──────┼────┘                V              └────┼────────────────────┘
+│      └──────┘      │             ┌──────────────┐            │
+│                    │             │   In Cache   │       ┌─────────┐
+└────────────────────┘             └──────────────┘       │         │
+                                           │              │Increment│
+                                           │              │ counter │
+                                           └─────────────▶│         │
+                                                          │If < than│
+                                                          │threshold│
+                                                          │         │
+                                                          └─────────┘
+```
+
+
+
+### Security Authentication and Credential provision
 
 #### Client Service mTLS Layer
 Proposed mTLS layer consists of the following scheme:
@@ -278,7 +257,7 @@ Proposed mTLS layer consists of the following scheme:
 └──────────┘  ┌────┴──┐     │   Client   │  ┌──────┴┐ │       ┌───────▼───────┐                │
               │Produce│     │    Cert    ├──┤Connect│ │       │  Fetch CN     │                │
 ┌──────────┐  │  TLS  ├────▶│            │  └───────┘ │       └───────────────┘                │
-│  Client  │  └────┬──┘     │ CN=FeAcKey │            │               │                        │
+│  Client  │  └────┬──┘     │ CN=Identity│            │               │                        │
 │ Frontend │       │        │            │            │       ┌───────┘                        │
 │  Access  │───────┘        └────────────┘            │       │                                │
 │    key   │                                         ┌┴───────▼───────┐                        │
@@ -293,141 +272,17 @@ Proposed mTLS layer consists of the following scheme:
 For the scope of the project and simplicity of initial implementation we consider following:
 - Encryption Key RSA 3072
 - Cipher Suites: TLS v1.3 compliant set
-- Client Common Name will be pre-filled with Frontend Access Key (for active selectors)
+- Client Common Name will be pre-filled with Identity Key (for Forwarder selectors)
 - TLS v1.3 as default configuration
 ###### Considerations
-- mTLS Layer will match CN Access Key to the available Access Keys in the connection manager
+- mTLS Layer will match CN Access Key to the available Identity Keys in the connection manager
 at the time of connection, scope should be limited to memory intensive operations for authorizing
 the connection
-- DDoS might pile up the waiting connections on the port, raising opened descriptors on the 
+- DDoS event might pile up the waiting connections on the port, raising opened descriptors on the 
 Linux machine to the limits, after which we can lose replica. For this to happen flow of the connections
 should exceed processing power for `certificate signature verification + hashMap access time`. 
 - System should be able to drop connection and close descriptors as fast as possible
-
-### Privacy
-
-No PII Considered in scope of this design
-
-### UX
-
-UX is not considered as a part of this design document, however API endpoints provided
-for further UX/UI implementation
-
-### Proto Specification
-
-For simplicity of our application design and further integrations, common entities system uses
-for operations in main components will be provided as generated `proto` structs, benefits and 
-drawbacks of Protobuf as the schema design are not in the scope of this design document
-
-##### Proto definitions
-Minimal set to cover scope of this design
-```protobuf
-syntax = "proto3";
-package github.com.xdire.xlb.v1;
-import "google/protobuf/timestamp.proto";
-
-enum Strategy {
-  RoundRobin = 0;
-  LeastConn  = 1;
-}
-
-// API to manage client data
-message Client {
-  string uuid = 1;
-  string key  = 2;
-  string name = 3;
-  google.protobuf.Timestamp createdAt = 10;
-}
-
-// API to fetch the token
-message AccessToken {
-  string token = 1;
-  int32  expiresIn = 2;
-}
-
-// API to fetch the TLS credentials
-message FrontendTLSData {
-  string key = 2;
-  string certificate   = 3;
-  string caCertificate = 4;
-}
-
-// API to manage Frontend information and status
-message Frontend {
-  string   uuid     = 1;
-  bool     active   = 2;
-  Strategy strategy = 3;
-  int32    routeTimeoutMsec = 4;
-  string   clientId  = 5;
-  string   accessKey = 6;
-  repeated FrontendRoute routes = 8;
-}
-
-message FrontendRoute {
-  string route    = 1;
-  int32  capacity = 3;
-}
-
-// If we provide API to see current backend snapshot
-message Backend {
-  string   uuid       = 1;
-  string   frontendId = 2;
-  Strategy strategy   = 3;
-  repeated BackendRoute routes = 4;
-}
-
-message BackendRoute {
-  string route       = 1;
-  uint32 connections = 2;
-}
-```
-
-### Audit Events
-Audit events are not in the scope of initial implementation, but for the next iterations
-can be provided in following components:
-#### API Interface
-Events:
-- Client created
-- Client token provision
-- Client creates frontend
-- Client alters frontend
-
-#### Frontend component 
-Events:
-- Frontend accessed by client certificate with result of mTLS decision (Nsec batches)
-- Frontend shutdown with reason
-
-### Observability
-Observability events are not in the scope of initial implementation, but for the next iterations
-can be provided in the following components
-#### Frontend component
-###### Can contribute following metrics:
-- Connection verified by mTLS for the Labels: FrontendId ClientId
-- Connection rejected with reason for the Labels: FrontendId ClientId Cause[mTLS,Limiter]
-
-###### Alerts:
-- Connection rejected for Labels: FrontendId ClientId Cause[mTLS,NoActiveFrontend,Limiter]
-
-#### Backend component
-###### Can contribute following metrics:
-- Backend accepted connection for the Labels: FrontendId ClientId ADDR-out
-- Backend connection was rejected for the Labels: FrontendId ClientId ADDR-out Cause[Timeout,Rejected]
-- Backend connection closed for the Labels: FrontendId ClientId ADDR-out | Values: connection time, bytes
-
-###### Alerts:
-- Backend connection rejection thresholds by ADDR-out
-- Backend connection hitting the limits for provided thresholds in ADDR-out Route
-
-### Product Usage
-
-Product can be used as the containerized API application providing following capabilities:
-- API Interface interacting with Centralized Database to scale up Frontends
-- Container can receive events from Pub-Sub to activate/deactivate/invalidate certain resource and
-change the behavior
-
-### Test Plan
-
-For the scope of this design tests will be designed in following areas:
-- Tests for routing strategies to ensure proper operation capabilities and proper concurrency implementation
-- Tests that components follow the context closure
-- Functional tests with concurrency to ensure traffic flows without issues between clients and customer pool
+- Local IP Rate Limiter cache should help to drop unwanted connections for reasonable amount of IP Address
+records, taking the LRU structure per IP at ~approx:
+   - max(4 bytes (16 for str) + 1byte + Time(8 bytes) + DLL(8 + 8 + 8 bytes) + MAP(8 + 8 bytes)) < 128 bytes
+   - in 1Kb we can carry at least 8 LRU records, 8000 in 1Mb or 800000 in 100Mb.
