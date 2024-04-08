@@ -87,6 +87,8 @@ Balancer provides following components in order of flow and appearance:
 
 ## Components
 
+### Configuration
+
 ### Forwarder
 ```
                                ┌───────────────────┐
@@ -143,7 +145,8 @@ with the strategy which will block only on Next() entry).
 Updates are rare, this design does not target additional optimizations.
 
 #### Strategy Next()
-Strategy will use the current reference for provide the selection mechanics as a forward iteration loop.
+Provided strategy will use the current reference for provide the selection
+mechanics as a **forward iteration loop**.
 
 Strategy will block `updateMutex` on `Next()` but in following way:
 ```go
@@ -160,18 +163,8 @@ to mark the entries and replacing the slice reference.
 However, it will try to use the stale list once if it was fetched before Update Routes happened.
 
 ### Rate Limiter
-
-###### Per-session: When TLS Handshake happened and session got authorization
-In this path we provide a Token bucket for each customer pool resource, which will
-provide the sliding window for the authorized sessions
-
-###### Per IP address: When TLS Handshake failed 
-As we must address possibly super-large chunk of IP data to store in memory, in the scope
-of this library (not distributed) we will provide LRU TTL cache of size, which will update
-and purge while being called for the records. 
-
-1) Before TLS Handshake — we will peek in the cache to see if we should perform TLS at all
-2) After TLS Handshake failed — we will put record in the cache
+Introducing 2 paths to enforce rate limiting per customer pool and for unauthorized
+connections.
 ```
      ┌───────────┐
 ┌────┤Authorized ├────┐                         ┌───────────────┐
@@ -237,8 +230,77 @@ and purge while being called for the records.
                                                           │         │
                                                           └─────────┘
 ```
+###### Per-session: When TLS Handshake happened and session got authorization
+In this path we provide a Token bucket for each customer pool resource, which will
+provide the sliding window for the authorized sessions.
 
+For this design we assuming customer is using one balancer services pool as one instance of the
+service provided and by that design implies rate limiter per one identity of customer pool.
 
+###### Per IP address: When TLS Handshake failed 
+As we must address possibly super-large chunk of IP data to store in memory, in the scope
+of this library (not distributed) we will provide LRU TTL cache of size, which will update
+and purge while being called for the records. 
+
+1) Before TLS Handshake — we will peek in the cache to see if we should perform TLS at all
+2) After TLS Handshake failed — we will put record in the cache
+
+### Health Check Scheduler
+For managing Unhealthy routes we can create simple service based on concurrent 
+`Min-time-to-next-check` `PriorityQueue`. Forwarder can offer `*Route` to this scheduler.
+
+- Scheduler will process `*Route` entries while `Active` and `!Healthy`.
+- Scheduler can be configured to do multiple checks before promote to `Healthy` with `checks` param
+- If `*Route` not `Active` anymore, it will not do `Push()` after `Pop()`
+
+Design scheme represents all above properties nicely:
+```
+                                              ┌────────────────────────┐
+  ┌───────────────────┐         ┌─────────────┤  Health Check Routine  ├────────────────┐
+  │ SubmitUnhealthy() │         │             └────────────────────────┘                │
+  └───────────────────┘         │                 ┌────────────────┐                    │
+            │                   │                 │ Priority Queue │                    │
+            │                   │                 └────────────────┘                    │
+            │                   │                 ┌────────────────┐                    │
+     ┌──────▼──────┐            │                 │     Poll()     │                    │
+     │ ┌────────┐  │            │                 └───────┬────────┘                    │
+     │ │ *Route │  │            │                         │                             │
+     │ └────────┘  │            │                         ▼ ┌───────┐                   │
+     │ ┌────────┐  │            │                        ╱ ╲│ Mutex │                   │
+     │ │ checks │  │            │                       ╱   └───────┘    ┌─────────┐    │
+     │ └────────┘  │            │  ┌───────┐           ┌─────┐           │priority │    │
+     │ ┌────────┐  │            │  │ Empty ◀───────────│PEEK ├───────────▶    >    │    │
+     │ │ passed │  │            │  └───┬───┘           └─────┘           │time.Now │    │
+     │ └────────┘  │            │      │                ╲   ╱            └────┬────┘    │
+     │ ┌────────┐  │            │      │                 ╲ ╱                  │         │
+     │ │  next  │  │            │      │                  │                   │         │
+     │ │ check  │  │            │┌─────▼─────┐            │            ┌──────▼──────┐  │
+     │ └────────┘  │            ││   Await   │       ┌────▼────┐       │    Await    │  │
+     └──────┬──────┘            ││           │       │time.Now │       │             │  │
+        ┌───┴────┐              ││ <-newTask │       │    >    │       │  <-newTask  │  │
+        │ Push() │              ││<-ctx.Done │       │ priority│       │<-time.After │  │
+        └───┬────┘              ││           │       └────┬────┘       │ <-ctx.Done  │  │
+            │                   ││sleeping=1 │            │            │             │  │
+┌───────────▼──────────────┐    │└───────────┘       ┌────▼────┐       └─────────────┘  │
+│ Priority Queue           │    │                    │  Pop()  │                        │
+│                          │    │                    └────┬────┘                        │
+│ MIN:(time.Now+nextCheck) │    │                         │                             │
+└───────────┬──────────────┘    │                    ┌────▼────┐                        │
+            │                   │             ┌──────│re Dial()│──────┐                 │
+     ┌──────▼──────┐            │             │      └─────────┘      │                 │
+     │             │            │             │                       ▼                 │
+     │ if sleeping │            │             ▼                  ┌─────────┐            │
+     │  newTask <- │            │        ┌────────┐              │ passed  │            │
+     │  sleeping=0 │            │        │passed=0│              │   ==    │            │
+     │             │            │        └────┬───┘              │ checks  │            │
+     └─────────────┘            │             │                  └────┬────┘            │
+                                │             │                       │                 │
+                                │        ┌────▼───┐              ┌────▼────┐            │
+                                │        │ Push() │              │ *Route  │            │
+                                │        └────────┘              │ active  │            │
+                                │                                └─────────┘            │
+                                └───────────────────────────────────────────────────────┘
+```
 
 ### Security Authentication and Credential provision
 
@@ -246,8 +308,8 @@ and purge while being called for the records.
 Proposed mTLS layer consists of the following scheme:
 ```
                                                                     ╔════════════╗
-                                                      ┌─────────────╣ Connection ╠─────────────┐
-                                                      │             ║  manager   ║             │
+                                                      ┌─────────────╣    Load    ╠─────────────┐
+                                                      │             ║  balancer  ║             │
                                                       │             ╚════════════╝             │
                                                       │                                        │
 ┌──────────┐                                          │       ┌───────────────┐                │
@@ -263,11 +325,21 @@ Proposed mTLS layer consists of the following scheme:
 │    key   │                                         ┌┴───────▼───────┐                        │
 └──────────┘                                         │ Lookup Access  │    ┌─────────────────┐ │
                                                      │  Key in Cache  │    │  Dispatch to    │ │
-                                                     │  of available  │────▶ correct Backend │ │
+                                                     │  of available  │────▶correct Forwarder│ │
                                                      │ customer pools │    └─────────────────┘ │
                                                      └┬───────────────┘                        │
                                                       └────────────────────────────────────────┘
 ```
+###### Common Name Identity
+Provided to Load Balancer with `AddForwarderPool(pool ServicePool)` method where `ServicePool` is
+the interface for the persistent configuration. `ServicePool.GetIdentity()` will be used to ensure
+`CN` match for authorization.
+
+This design will limit scope of Identity to simple selection of the whole set of the customer pool
+for such identity.
+
+As the future next steps certificate can be enriched with property like the `OU=role` and this will
+provide ability to have customer pools to routed for the authentication with additional precision.
 ###### Scope 
 For the scope of the project and simplicity of initial implementation we consider following:
 - Encryption Key RSA 3072
@@ -285,4 +357,6 @@ should exceed processing power for `certificate signature verification + hashMap
 - Local IP Rate Limiter cache should help to drop unwanted connections for reasonable amount of IP Address
 records, taking the LRU structure per IP at ~approx:
    - max(4 bytes (16 for str) + 1byte + Time(8 bytes) + DLL(8 + 8 + 8 bytes) + MAP(8 + 8 bytes)) < 128 bytes
-   - in 1Kb we can carry at least 8 LRU records, 8000 in 1Mb or 800000 in 100Mb.
+   - in 1Kb we can carry at least 8 LRU records, 8000 in 1Mb or 800000 in 100Mb, 8M in 1Gb
+   - capacity of 8M records to be dropped before additional CPU cycles can give some insurance
+  
