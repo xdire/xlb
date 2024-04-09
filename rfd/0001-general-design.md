@@ -28,6 +28,7 @@ TCP Proxy Load balancer with mTLS can solve the following set of problems:
 
 ## Details
 
+---
 Design will discuss following areas:
 - [General Structure](#structure)
 - [Components](#components)
@@ -36,6 +37,8 @@ Design will discuss following areas:
 - [Security](#security-authentication-and-credential-provision)
 
 ## Structure
+
+---
 Balancer provides following components in order of flow and appearance:
 
 1) Rate Limiting System
@@ -87,6 +90,8 @@ Balancer provides following components in order of flow and appearance:
 
 ## Components
 
+---
+
 ### Configuration
 LoadBalancer can be configured on new instance creation with following slice of Services
 provided at the time of instance creation:
@@ -120,7 +125,7 @@ type Route interface {
 As well load balancer will have method `AddServicePool(pool ServicePool)` to do following:
 - if pool exists for identity, update this pool
 - if pool did not exist, spawn all the required items and run routing
-
+---
 ### Forwarder
 ```
                                ┌───────────────────┐
@@ -193,6 +198,8 @@ This will adjust behavior to not pick the stale `[]*Route` if Update Routes star
 to mark the entries and replacing the slice reference.
 
 However, it will try to use the stale list once if it was fetched before Update Routes happened.
+
+---
 
 ### Rate Limiter
 Introducing 2 paths to enforce rate limiting per customer pool and for unauthorized
@@ -276,6 +283,7 @@ and purge while being called for the records.
 
 1) Before TLS Handshake — we will peek in the cache to see if we should perform TLS at all
 2) After TLS Handshake failed — we will put record in the cache
+---
 
 ### Health Check Scheduler
 For managing Unhealthy routes we can create simple service based on concurrent 
@@ -336,7 +344,7 @@ Design scheme represents all above properties nicely:
 
 ### Security Authentication and Credential provision
 
-#### Client Service mTLS Layer
+---
 Proposed mTLS layer consists of the following scheme:
 ```
                                                                     ╔════════════╗
@@ -362,7 +370,8 @@ Proposed mTLS layer consists of the following scheme:
                                                      └┬───────────────┘                        │
                                                       └────────────────────────────────────────┘
 ```
-###### Common Name Identity
+#### Common Name Identity
+
 Provided to Load Balancer with `AddForwarderPool(pool ServicePool)` method where `ServicePool` is
 the interface for the persistent configuration. `ServicePool.Identity()` will be used to ensure
 `CN` match for authorization.
@@ -372,13 +381,17 @@ for such identity.
 
 As the future next steps certificate can be enriched with property like the `OU=role` and this will
 provide ability to have customer pools to routed for the authentication with additional precision.
-###### Scope 
+
+#### Scope 
+
 For the scope of the project and simplicity of initial implementation we consider following:
 - Encryption Key RSA 3072
 - Cipher Suites: TLS v1.3 compliant set
 - Client Common Name will be pre-filled with Identity Key (for Forwarder selectors)
 - TLS v1.3 as default configuration
-###### Considerations
+- 
+#### Considerations
+
 - mTLS Layer will match CN Access Key to the available Identity Keys in the connection manager
 at the time of connection, scope should be limited to memory intensive operations for authorizing
 the connection
@@ -391,4 +404,3 @@ records, taking the LRU structure per IP at ~approx:
    - max(4 bytes (16 for str) + 1byte + Time(8 bytes) + DLL(8 + 8 + 8 bytes) + MAP(8 + 8 bytes)) < 128 bytes
    - in 1Kb we can carry at least 8 LRU records, 8000 in 1Mb or 800000 in 100Mb, 8M in 1Gb
    - capacity of 8M records to be dropped before additional CPU cycles can give some insurance
-  
