@@ -88,6 +88,38 @@ Balancer provides following components in order of flow and appearance:
 ## Components
 
 ### Configuration
+LoadBalancer can be configured on new instance creation with following slice of Services
+provided at the time of instance creation:
+
+`{services: []ServicePool}` Where ServicePool is representing following interface:
+```go
+type ServicePool interface {
+    // How each ServicePool identified, CN match
+    Identity() string   
+	// Port to listen for incoming traffic
+    Port() int
+	// Rate of times per time.Duration
+    RateQuota() (int, time.Duration)
+    // How many unauthorized attempts before IP cache placement
+    UnathorizedAttempts() int
+    // Bring host back in routable healthy state after this amount of validations
+    HealthCheckValidations() int
+    // Routes to route
+    Routes() []Route
+}
+
+type Route interface {
+	// Stores path of the upstream
+	Path()   string
+	// Provides information if route is active, in case of update
+	// function can provide false and that will adjust behavior of forwarder
+	Active() bool
+}
+```
+
+As well load balancer will have method `AddServicePool(pool ServicePool)` to do following:
+- if pool exists for identity, update this pool
+- if pool did not exist, spawn all the required items and run routing
 
 ### Forwarder
 ```
@@ -332,7 +364,7 @@ Proposed mTLS layer consists of the following scheme:
 ```
 ###### Common Name Identity
 Provided to Load Balancer with `AddForwarderPool(pool ServicePool)` method where `ServicePool` is
-the interface for the persistent configuration. `ServicePool.GetIdentity()` will be used to ensure
+the interface for the persistent configuration. `ServicePool.Identity()` will be used to ensure
 `CN` match for authorization.
 
 This design will limit scope of Identity to simple selection of the whole set of the customer pool
