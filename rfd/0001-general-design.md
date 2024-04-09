@@ -96,9 +96,9 @@ provided at the time of instance creation:
 type ServicePool interface {
     // How each ServicePool identified, CN match
     Identity() string   
-	// Port to listen for incoming traffic
+    // Port to listen for incoming traffic
     Port() int
-	// Rate of times per time.Duration
+    // Rate of times per time.Duration
     RateQuota() (int, time.Duration)
     // How many unauthorized attempts before IP cache placement
     UnathorizedAttempts() int
@@ -109,11 +109,11 @@ type ServicePool interface {
 }
 
 type Route interface {
-	// Stores path of the upstream
-	Path()   string
-	// Provides information if route is active, in case of update
-	// function can provide false and that will adjust behavior of forwarder
-	Active() bool
+    // Stores path of the upstream
+    Path()   string
+    // Provides information if route is active, in case of update
+    // function can provide false and that will adjust behavior of forwarder
+    Active() bool
 }
 ```
 
