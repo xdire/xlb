@@ -42,12 +42,17 @@ func NewForwarder(ctx context.Context, params ServicePool, logger Logger) *Forwa
 		if !rte.Active() {
 			continue
 		}
-		fwd.routes = append(fwd.routes, &route{
-			address:     rte.Path(),
-			healthy:     atomic.Bool{},
-			connections: 0,
-			active:      atomic.Bool{},
-		})
+		fwd.routes = append(fwd.routes, func() *route {
+			r := &route{
+				address:     rte.Path(),
+				healthy:     atomic.Bool{},
+				connections: 0,
+				active:      atomic.Bool{},
+			}
+			r.active.Store(true)
+			r.healthy.Store(true)
+			return r
+		}())
 	}
 	return fwd
 }
@@ -64,6 +69,9 @@ func (f *Forwarder) Attach(ctx context.Context, in *tls.Conn) error {
 	}(in)
 
 	rte := f.strategy.Next()
+	if rte == nil {
+		return fmt.Errorf("no active routes available")
+	}
 	dest, err := net.DialTimeout("tcp", rte.address, f.dialTimeout)
 	if err != nil {
 		f.logger.Error(fmt.Sprintf("route unreachable %s", rte.address))

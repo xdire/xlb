@@ -3,6 +3,7 @@ package xlb
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -90,16 +91,20 @@ func (lb *LoadBalancer) Listen() error {
 
 		config := &tls.Config{
 			Certificates: []tls.Certificate{pki.Certificate},
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-			ClientCAs:    pki.CertPool,
-			CipherSuites: []uint16{
-				tls.TLS_AES_128_GCM_SHA256,       // 2022 TLS v1.3 compliant
-				tls.TLS_CHACHA20_POLY1305_SHA256, // 2022 TLS v1.3 compliant
-				tls.TLS_AES_256_GCM_SHA384,       // 2022 TLS v1.3 compliant
+			ClientAuth:   tls.RequestClientCert,
+			// ClientCAs:    pki.CertPool,
+			RootCAs: pki.CertPool,
+			//CipherSuites: []uint16{
+			//	tls.TLS_AES_128_GCM_SHA256,       // 2022 TLS v1.3 compliant
+			//	tls.TLS_CHACHA20_POLY1305_SHA256, // 2022 TLS v1.3 compliant
+			//	tls.TLS_AES_256_GCM_SHA384,       // 2022 TLS v1.3 compliant
+			//},
+			//MinVersion:       tls.VersionTLS13,
+			//MaxVersion:       tls.VersionTLS13,
+			//CurvePreferences: []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
+			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				return nil
 			},
-			MinVersion:       tls.VersionTLS13,
-			MaxVersion:       tls.VersionTLS13,
-			CurvePreferences: []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
 		}
 
 		scheduleListeners = append(scheduleListeners, schedule{port, config, identity})
@@ -118,7 +123,7 @@ func (lb *LoadBalancer) Listen() error {
 			// Don't forget to close all contexts
 			defer derCancel()
 			// Try to listen
-			listen, err := tls.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", toSchedule.port), toSchedule.tls)
+			listen, err := tls.Listen("tcp", fmt.Sprintf("localhost:%d", toSchedule.port), toSchedule.tls)
 			if err != nil {
 				errChan <- fmt.Errorf("failed to listen on port")
 				wg.Done()
@@ -138,6 +143,8 @@ func (lb *LoadBalancer) Listen() error {
 				}
 			}(listen)
 
+			lb.logger.Info(fmt.Sprintf("listening at port %d", toSchedule.port))
+
 			// Bind pool and forwarder
 			currentPool := toSchedule.pool
 			var forwarder *Forwarder
@@ -156,18 +163,20 @@ func (lb *LoadBalancer) Listen() error {
 					return
 				}
 
+				lb.logger.Info(fmt.Sprintf("accepting request for port %d", toSchedule.port))
+
 				// Convert to TLS and proceed with the handshake
 				tlsConn := conn.(*tls.Conn)
 				err = tlsConn.Handshake()
 				if err != nil {
-					log.Err(err).Msg("failed to complete handshake")
+					lb.logger.Error(fmt.Errorf("cannot complete handshake, %w", err).Error())
 					continue
 				}
 
 				// Verify certificate CN and find or create corresponding backend to dispatch
 				certs := tlsConn.ConnectionState().PeerCertificates
 				if len(certs) == 0 {
-					log.Err(err).Msg("failed to extract certificate")
+					lb.logger.Error("failed to extract certificate")
 					continue
 				}
 

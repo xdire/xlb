@@ -2,7 +2,6 @@ package libtests
 
 import (
 	"context"
-	"fmt"
 	"github.com/xdire/xlb"
 	"os"
 	"testing"
@@ -13,7 +12,7 @@ func TestRunningLoadBalancerAsLib(t *testing.T) {
 	// Prepare TLS data for the test
 	err := createLocalTLSData()
 	defer func() {
-		err := wipeLocalTLSData("./")
+		err = wipeLocalTLSData("./")
 		if err != nil {
 			t.Error("cannot clean pre-arranged test files")
 		}
@@ -56,11 +55,11 @@ func TestRunningLoadBalancerAsLib(t *testing.T) {
 		SvcRateQuotaDuration: time.Second * 1,
 		SvcRoutes: []xlb.Route{
 			TestServicePoolRoute{
-				ServicePath:   "localhost:9081/api1",
+				ServicePath:   "localhost:9081",
 				ServiceActive: true,
 			},
 			TestServicePoolRoute{
-				ServicePath:   "localhost:9082/api2",
+				ServicePath:   "localhost:9082",
 				ServiceActive: true,
 			},
 		},
@@ -80,11 +79,11 @@ func TestRunningLoadBalancerAsLib(t *testing.T) {
 	// Give 5 seconds for testing everything
 	go func() {
 		<-time.After(time.Second * 1)
-		res, err := sendRequest("https://localhost:9089")
+		res, err := sendRequest("https://localhost:9089/api1")
 		if err != nil {
-			t.Errorf("cannot reach remotes")
+			t.Errorf("cannot reach remotes, error: %+v", err)
 		}
-		fmt.Printf("result: %s", res)
+		t.Logf("result: %s", res)
 	}()
 
 	// Listen for all threads
