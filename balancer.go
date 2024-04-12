@@ -80,7 +80,7 @@ func (lb *LoadBalancer) Listen() error {
 	}
 	scheduleListeners := make([]schedule, 0)
 
-	// Build schedule list to not to have thread failures at this stage
+	// Build schedule list not to have thread failures at this stage
 	for port, identity := range mapping {
 
 		pki, err := tlsutil.FromPKI(identity.TLSData().GetCertificate(), identity.TLSData().GetPrivateKey())
@@ -115,6 +115,9 @@ func (lb *LoadBalancer) Listen() error {
 		go func(ctx context.Context, cancelAll context.CancelFunc, errChan chan error, toSchedule schedule) {
 
 			wg.Add(1)
+			// Don't forget to close all contexts
+			defer derCancel()
+			// Try to listen
 			listen, err := tls.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", toSchedule.port), toSchedule.tls)
 			if err != nil {
 				errChan <- fmt.Errorf("failed to listen on port")
@@ -195,7 +198,13 @@ func (lb *LoadBalancer) Listen() error {
 
 		}(derCtx, derCancel, errChan, params)
 	}
-
+	// Wait here until all the listeners will spawn and monitor if any failed, and if failed — fail the whole task
+	wg.Wait()
+	err = <-errChan
+	if err != nil {
+		derCancel()
+		return fmt.Errorf("failed to listen for one of the ports, all listeners will shutdown, error: %w", err)
+	}
 	return nil
 }
 

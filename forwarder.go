@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -39,6 +38,17 @@ func NewForwarder(ctx context.Context, params ServicePool, logger Logger) *Forwa
 		dialTimeout = time.Second * 30
 	}
 	fwd.dialTimeout = dialTimeout
+	for _, rte := range params.Routes() {
+		if !rte.Active() {
+			continue
+		}
+		fwd.routes = append(fwd.routes, &route{
+			address:     rte.Path(),
+			healthy:     atomic.Bool{},
+			connections: 0,
+			active:      atomic.Bool{},
+		})
+	}
 	return fwd
 }
 
@@ -53,18 +63,18 @@ func (f *Forwarder) Attach(ctx context.Context, in *tls.Conn) error {
 		close(errTransport)
 	}(in)
 
-	route := f.strategy.Next()
-	dest, err := net.DialTimeout("tcp", route.address, f.dialTimeout)
+	rte := f.strategy.Next()
+	dest, err := net.DialTimeout("tcp", rte.address, f.dialTimeout)
 	if err != nil {
-		f.logger.Error(fmt.Sprintf("route unreachable %s", route.address))
+		f.logger.Error(fmt.Sprintf("route unreachable %s", rte.address))
 		return err
 	}
 
 	go func(w io.Writer, r io.Reader) {
-		atomic.AddUint32(&route.connections, 1)
+		atomic.AddUint32(&rte.connections, 1)
 		_, err := io.Copy(w, r)
 		errTransport <- err
-		atomic.AddUint32(&route.connections, ^uint32(0))
+		atomic.AddUint32(&rte.connections, ^uint32(0))
 	}(dest, in)
 
 	go func(w io.Writer, r io.Reader) {
@@ -96,13 +106,13 @@ type leastConnection struct {
 }
 
 func (lc leastConnection) Next() *route {
-	min := uint32(math.MaxInt)
+	minVal := uint32(32000)
 	var rte *route
 	for _, route := range lc.fwd.routes {
 		if route.active.Load() && route.healthy.Load() {
 			conn := atomic.LoadUint32(&route.connections)
-			if conn < min {
-				min = conn
+			if conn < minVal {
+				minVal = conn
 				rte = route
 			}
 		}
