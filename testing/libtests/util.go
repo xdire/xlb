@@ -66,8 +66,7 @@ func (t TestServicePoolConfig) HealthCheckValidations() int {
 }
 
 func (t TestServicePoolConfig) RouteTimeout() time.Duration {
-	//TODO implement me
-	panic("implement me")
+	return time.Second * 30
 }
 
 type TestServicePoolRoute struct {
@@ -111,7 +110,7 @@ func createLocalTLSData() error {
 		return err
 	}
 
-	srvCSR := exec.Command("openssl", "req", "-new", "-key", "server.key", "-out", "server.csr", "-subj", "/C=US/ST=California/L=Alameda/O=XLB/CN=localhost")
+	srvCSR := exec.Command("openssl", "req", "-new", "-key", "server.key", "-out", "server.csr", "-subj", "/C=US/ST=California/L=Alameda/O=XLB", "-addext", "subjectAltName=DNS:localhost")
 	err = srvCSR.Start()
 	if err != nil {
 		return err
@@ -121,7 +120,11 @@ func createLocalTLSData() error {
 		return err
 	}
 
-	srvCert := exec.Command("openssl", "x509", "-req", "-in", "server.csr", "-CA", "ca.crt", "-CAkey", "ca.key", "-CAcreateserial", "-out", "server.crt", "-days", "1", "-sha256")
+	if err := os.WriteFile("server_san.txt", []byte("subjectAltName=DNS:localhost"), 0666); err != nil {
+		return err
+	}
+
+	srvCert := exec.Command("openssl", "x509", "-req", "-in", "server.csr", "-CA", "ca.crt", "-CAkey", "ca.key", "-CAcreateserial", "-out", "server.crt", "-days", "1", "-sha256", "-extfile", "server_san.txt")
 	err = srvCert.Start()
 	if err != nil {
 		return err
@@ -142,7 +145,7 @@ func createLocalTLSData() error {
 		return err
 	}
 
-	clientCSR := exec.Command("openssl", "req", "-new", "-key", "client.key", "-out", "client.csr", "-subj", "/C=US/ST=California/L=San Francisco/O=Client Company/CN=test")
+	clientCSR := exec.Command("openssl", "req", "-new", "-key", "client.key", "-out", "client.csr", "-subj", "/C=US/ST=California/L=San Francisco/O=Client Company/CN=test", "-addext", "subjectAltName=DNS:localhost")
 	err = clientCSR.Start()
 	if err != nil {
 		return err
@@ -224,20 +227,20 @@ func sendRequest(url string) (string, error) {
 	}
 	caData, err2 := os.ReadFile("ca.crt")
 	if err2 != nil {
-		return "", err2
+		return "", fmt.Errorf("cannot read ca certificate for sending the request, error: %w", err)
 	}
-	caCert, err3 := x509.ParseCertificate(caData)
-	if err3 != nil {
-		return "", err3
-	}
+	//caCert, err3 := x509.ParseCertificate(caData)
+	//if err3 != nil {
+	//	return "", fmt.Errorf("cannot decode ca certificate for sending the request, error: %w", err)
+	//}
 
 	// Configure TLS client
 	pool := x509.NewCertPool()
-	pool.AddCert(caCert)
+	pool.AppendCertsFromPEM(caData)
 	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      pool,
-		// InsecureSkipVerify: true,
+		Certificates:       []tls.Certificate{cert},
+		RootCAs:            pool,
+		InsecureSkipVerify: false,
 	}
 
 	// Create an HTTP client with the custom TLS configuration
