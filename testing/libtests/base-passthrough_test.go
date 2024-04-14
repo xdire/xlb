@@ -14,19 +14,23 @@ func TestRunningLoadBalancerBaseRouting(t *testing.T) {
 	ctx, cancelAll := context.WithCancel(context.Background())
 	defer cancelAll()
 
+	t.Log("test prepare, create TLS files")
 	// Prepare TLS data for the test
 	err := testing2.CreateLocalTLSData()
 	defer func() {
-		err = testing2.WipeLocalTLSData("./")
+		t.Log("test unwind, delete TLS files")
+		out, err := testing2.WipeLocalTLSData("./")
 		if err != nil {
 			t.Error("cannot clean pre-arranged test files")
 		}
+		t.Logf("files deleted: %+v", out)
 	}()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Prepare responding servers for the test
+	t.Log("test prepare, create responding servers")
 	stopServer1, err := testing2.CreateTestServer(ctx, 9081, "api", "Server 1 responded")
 	if err != nil {
 		t.Errorf("Failed to start test server 1: %v", err)
@@ -43,6 +47,7 @@ func TestRunningLoadBalancerBaseRouting(t *testing.T) {
 	}
 	defer stopServer3()
 
+	t.Log("test prepare, create loadbalancer instance")
 	cert, err := os.ReadFile("server.crt")
 	if err != nil {
 		t.Error(err)

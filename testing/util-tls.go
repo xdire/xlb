@@ -93,10 +93,10 @@ func CreateLocalTLSData() error {
 	return nil
 }
 
-func WipeLocalTLSData(dirPath string) error {
+func WipeLocalTLSData(dirPath string) ([]string, error) {
 	ext := []string{".key", ".srl", ".crt", ".csr", ".txt"}
-
-	return filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+	out := make([]string, 0)
+	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -108,7 +108,7 @@ func WipeLocalTLSData(dirPath string) error {
 					if err != nil {
 						fmt.Printf("Error deleting file %s: %v\n", path, err)
 					} else {
-						fmt.Printf("Deleted file: %s\n", path)
+						out = append(out, fmt.Sprintf("%s", path))
 					}
 					break
 				}
@@ -117,4 +117,9 @@ func WipeLocalTLSData(dirPath string) error {
 
 		return nil
 	})
+
+	if err != nil {
+		return out, fmt.Errorf("deletion failed, error: %w", err)
+	}
+	return out, nil
 }
