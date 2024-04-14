@@ -20,7 +20,7 @@ type route struct {
 
 type Forwarder struct {
 	routes      *[]*route
-	mutex       sync.Mutex
+	mutex       sync.RWMutex
 	updateLock  bool
 	strategy    leastConnection
 	logger      Logger
@@ -30,7 +30,6 @@ type Forwarder struct {
 func NewForwarder(ctx context.Context, params ServicePool, logger Logger) *Forwarder {
 	fwd := &Forwarder{
 		routes: &[]*route{},
-		mutex:  sync.Mutex{},
 		logger: logger,
 	}
 	fwd.strategy = leastConnection{fwd}
@@ -163,8 +162,8 @@ func (lc leastConnection) Next() *route {
 	// Lock and unlock just to get access to the latest routes slice
 	// this delivers support for hot-reload of the routes by pointer refresh
 	// leastConnection might work for one cycle with outdated records
-	lc.fwd.mutex.Lock()
-	lc.fwd.mutex.Unlock()
+	lc.fwd.mutex.RLock()
+	lc.fwd.mutex.RUnlock()
 
 	var rte *route
 	for _, route := range *lc.fwd.routes {
