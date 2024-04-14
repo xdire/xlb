@@ -3,10 +3,8 @@ package xlb
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
 	"github.com/xdire/xlb/tlsutil"
 	"net"
 	"strings"
@@ -24,6 +22,7 @@ type LoadBalancer struct {
 	logger       Logger
 	poolMap      map[string]ServicePool
 	forwarderMap map[string]*Forwarder
+	mutex        sync.Mutex
 }
 
 func NewLoadBalancer(ctx context.Context, cfgPool []ServicePool, opt Options) (*LoadBalancer, error) {
@@ -62,6 +61,19 @@ func NewLoadBalancer(ctx context.Context, cfgPool []ServicePool, opt Options) (*
 	}, nil
 }
 
+func (lb *LoadBalancer) UpdatePool(pool ServicePool) error {
+	if len(pool.Identity()) == 0 {
+		return fmt.Errorf("pool missing identity")
+	}
+	lb.mutex.Lock()
+	defer lb.mutex.Unlock()
+	lb.poolMap[pool.Identity()] = pool
+	if fwd, exists := lb.forwarderMap[pool.Identity()]; exists {
+		fwd.UpdateServicePool(pool)
+	}
+	return nil
+}
+
 // Listen will try to launch balancer on all the required ports, strategy is all or nothing
 func (lb *LoadBalancer) Listen() error {
 
@@ -92,19 +104,15 @@ func (lb *LoadBalancer) Listen() error {
 		config := &tls.Config{
 			Certificates: []tls.Certificate{pki.Certificate},
 			ClientAuth:   tls.RequestClientCert,
-			// ClientCAs:    pki.CertPool,
-			RootCAs: pki.CertPool,
-			//CipherSuites: []uint16{
-			//	tls.TLS_AES_128_GCM_SHA256,       // 2022 TLS v1.3 compliant
-			//	tls.TLS_CHACHA20_POLY1305_SHA256, // 2022 TLS v1.3 compliant
-			//	tls.TLS_AES_256_GCM_SHA384,       // 2022 TLS v1.3 compliant
-			//},
-			//MinVersion:       tls.VersionTLS13,
-			//MaxVersion:       tls.VersionTLS13,
-			//CurvePreferences: []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
-			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-				return nil
+			RootCAs:      pki.CertPool,
+			CipherSuites: []uint16{
+				tls.TLS_AES_128_GCM_SHA256,       // 2022 TLS v1.3 compliant
+				tls.TLS_CHACHA20_POLY1305_SHA256, // 2022 TLS v1.3 compliant
+				tls.TLS_AES_256_GCM_SHA384,       // 2022 TLS v1.3 compliant
 			},
+			MinVersion:       tls.VersionTLS13,
+			MaxVersion:       tls.VersionTLS13,
+			CurvePreferences: []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
 		}
 
 		scheduleListeners = append(scheduleListeners, schedule{port, config, identity})
@@ -155,15 +163,19 @@ func (lb *LoadBalancer) Listen() error {
 				conn, err := listen.Accept()
 				if err != nil {
 					if strings.Contains(err.Error(), "closed network") {
+						// Graceful
 						lb.logger.Debug(fmt.Sprintf("listener closed, closed network for port: %d", toSchedule.port))
+						errChan <- nil
 					} else {
+						// Other kind of error
 						lb.logger.Error(fmt.Errorf("failed to accept connection, error: %w", err).Error())
+						errChan <- fmt.Errorf("failed to listen on port, error: %w", err)
 					}
-					errChan <- fmt.Errorf("failed to listen on port, error: %w", err)
+					delete(lb.forwarderMap, currentPool.Identity())
 					return
 				}
 
-				lb.logger.Info(fmt.Sprintf("accepting request for port %d", toSchedule.port))
+				lb.logger.Debug(fmt.Sprintf("accepting request for port %d", toSchedule.port))
 
 				// Convert to TLS and proceed with the handshake
 				tlsConn := conn.(*tls.Conn)
@@ -186,19 +198,31 @@ func (lb *LoadBalancer) Listen() error {
 
 				// Forward the connections
 				if identity == currentPool.Identity() {
+
 					if forwarder != nil {
 						go func() {
 							err := forwarder.Attach(ctx, tlsConn)
 							if err != nil {
-								log.Err(err).Msg("cannot attach to backend")
+								if err.Error() == "context canceled" {
+									lb.logger.Error("conn closing gracefully on context")
+									return
+								}
+								lb.logger.Error(fmt.Errorf("cannot attach to backend, error: %w", err).Error())
 							}
 						}()
 					} else {
 						forwarder = NewForwarder(ctx, currentPool, lb.logger)
+						lb.mutex.Lock()
+						lb.forwarderMap[currentPool.Identity()] = forwarder
+						lb.mutex.Unlock()
 						go func() {
 							err := forwarder.Attach(ctx, tlsConn)
 							if err != nil {
-								log.Err(err).Msg("cannot attach to backend")
+								if err.Error() == "context canceled" {
+									lb.logger.Error("conn closing gracefully on context")
+									return
+								}
+								lb.logger.Error(fmt.Errorf("cannot attach to backend, error: %w", err).Error())
 							}
 						}()
 					}
