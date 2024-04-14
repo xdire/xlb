@@ -5,12 +5,13 @@ import (
 	"github.com/xdire/xlb"
 	testing2 "github.com/xdire/xlb/testing"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestRunningLoadBalancerBaseRouting(t *testing.T) {
+func TestLoadBalancerHotReloadRouting(t *testing.T) {
 	ctx, cancelAll := context.WithCancel(context.Background())
 	defer cancelAll()
 
@@ -56,7 +57,9 @@ func TestRunningLoadBalancerBaseRouting(t *testing.T) {
 		return
 	}
 
-	balancer, err := xlb.NewLoadBalancer(ctx, []xlb.ServicePool{testing2.TestServicePoolConfig{
+	// Create pool with the single host and add rest of the hosts during the
+	// requests coming concurrently
+	servicePool := testing2.TestServicePoolConfig{
 		SvcIdentity:          "test",
 		SvcPort:              9089,
 		SvcRateQuotaTimes:    10,
@@ -66,18 +69,12 @@ func TestRunningLoadBalancerBaseRouting(t *testing.T) {
 				ServicePath:   "localhost:9081",
 				ServiceActive: true,
 			},
-			testing2.TestServicePoolRoute{
-				ServicePath:   "localhost:9082",
-				ServiceActive: true,
-			},
-			testing2.TestServicePoolRoute{
-				ServicePath:   "localhost:9083",
-				ServiceActive: true,
-			},
 		},
 		Certificate: string(cert),
 		CertKey:     string(key),
-	}}, xlb.Options{})
+	}
+
+	balancer, err := xlb.NewLoadBalancer(ctx, []xlb.ServicePool{servicePool}, xlb.Options{})
 	if err != nil {
 		return
 	}
@@ -90,13 +87,31 @@ func TestRunningLoadBalancerBaseRouting(t *testing.T) {
 
 	// Create senders
 	responses := make(chan string, 100)
+
 	go func() {
 		<-time.After(time.Second * 1)
+		nextPort := 9081
 		for i := 0; i < 100; i++ {
+
 			// Spawn requests in batches
 			if i%10 == 0 {
 				time.Sleep(time.Millisecond * 100)
 			}
+
+			// each 20th request hot reload the routes, adding more servers to route to
+			if i > 0 && i%20 == 0 && nextPort < 9083 {
+				nextPort++
+				servicePool.SvcRoutes = append(servicePool.SvcRoutes, testing2.TestServicePoolRoute{
+					ServicePath:   "localhost:" + strconv.Itoa(nextPort),
+					ServiceActive: true,
+				})
+				// Do hot reload for the forwarder
+				err = balancer.UpdatePool(servicePool)
+				if err != nil {
+					t.Errorf("cannot apply update pool for balancer, error %+v", err)
+				}
+			}
+
 			go func() {
 				// Test load balancer
 				res, err := testing2.SendRequest("https://localhost:9089/api")
