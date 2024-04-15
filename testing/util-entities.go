@@ -6,13 +6,14 @@ import (
 )
 
 type TestServicePoolConfig struct {
-	SvcIdentity          string
-	SvcPort              int
-	SvcRateQuotaTimes    int
-	SvcRateQuotaDuration time.Duration
-	SvcRoutes            []xlb.Route
-	Certificate          string
-	CertKey              string
+	SvcIdentity               string
+	SvcPort                   int
+	SvcRateQuotaTimes         int
+	SvcRateQuotaDuration      time.Duration
+	SvcHealthCheckValidations int
+	SvcRoutes                 []xlb.Route
+	Certificate               string
+	CertKey                   string
 }
 
 func (t TestServicePoolConfig) GetCertificate() string {
@@ -49,8 +50,7 @@ func (t TestServicePoolConfig) UnauthorizedAttempts() int {
 }
 
 func (t TestServicePoolConfig) HealthCheckValidations() int {
-	//TODO implement me
-	panic("implement me")
+	return t.SvcHealthCheckValidations
 }
 
 func (t TestServicePoolConfig) RouteTimeout() time.Duration {

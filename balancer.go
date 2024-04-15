@@ -212,7 +212,7 @@ func (lb *LoadBalancer) Listen() error {
 							}
 						}()
 					} else {
-						forwarder = NewForwarder(ctx, currentPool, lb.logger)
+						forwarder = NewForwarder(currentPool, lb.logger)
 						lb.mutex.Lock()
 						lb.forwarderMap[currentPool.Identity()] = forwarder
 						lb.mutex.Unlock()

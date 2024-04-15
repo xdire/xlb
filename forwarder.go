@@ -25,19 +25,29 @@ type Forwarder struct {
 	strategy    leastConnection
 	logger      Logger
 	dialTimeout time.Duration
+	health      *HealthCheckScheduler
 }
 
-func NewForwarder(ctx context.Context, params ServicePool, logger Logger) *Forwarder {
+func NewForwarder(params ServicePool, logger Logger) *Forwarder {
 	fwd := &Forwarder{
 		routes: &[]*route{},
 		logger: logger,
+		health: NewHealthCheckScheduler(HealthSchedulerOptions{
+			MaxItems:        len(params.Routes()) * 2,
+			Logger:          logger,
+			ReleaseChecks:   params.HealthCheckValidations(),
+			CheckIntervalMs: 5000,
+		}),
 	}
+	// Add strategy linking the forwarder
 	fwd.strategy = leastConnection{fwd}
+	// Default or provided timeout
 	dialTimeout := params.RouteTimeout()
 	if dialTimeout == 0 {
 		dialTimeout = time.Second * 30
 	}
 	fwd.dialTimeout = dialTimeout
+	// Assign routes
 	for _, rte := range params.Routes() {
 		if !rte.Active() {
 			continue
@@ -57,6 +67,9 @@ func NewForwarder(ctx context.Context, params ServicePool, logger Logger) *Forwa
 	return fwd
 }
 
+// UpdateServicePool
+// Will update current service pool with the set of new routes or other information
+// and do hotswap for the active routes in dispatch
 func (f *Forwarder) UpdateServicePool(pool ServicePool) {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
@@ -97,6 +110,8 @@ func (f *Forwarder) UpdateServicePool(pool ServicePool) {
 	f.logger.Info(fmt.Sprintf("forwarder routes updated to: %+v from: %+v", *f.routes, pool.Routes()))
 }
 
+// Attach
+// Attaches provided in channel to the one of the destinations behind the load balancer
 func (f *Forwarder) Attach(ctx context.Context, in *tls.Conn) error {
 
 	errTransport := make(chan error, 2)
@@ -107,15 +122,26 @@ func (f *Forwarder) Attach(ctx context.Context, in *tls.Conn) error {
 		}
 	}(in)
 
-	rte := f.strategy.Next()
-	if rte == nil {
-		return fmt.Errorf("no active routes available")
-	}
+	var rte *route
+	var dest net.Conn
+	var err error
 
-	dest, err := net.DialTimeout("tcp", rte.address, f.dialTimeout)
-	if err != nil {
-		f.logger.Error(fmt.Sprintf("route unreachable %s", rte.address))
-		return err
+	// Find next available route for satisfy connection request or fail finding nothing
+	for {
+		rte = f.strategy.Next()
+		// If no routes found, meaning all unhealthy or non-active then  provide error
+		if rte == nil {
+			return fmt.Errorf("no active routes available")
+		}
+
+		dest, err = net.DialTimeout("tcp", rte.address, f.dialTimeout)
+		if err != nil {
+			f.logger.Error(fmt.Sprintf("route unreachable %s", rte.address))
+			f.health.AddUnhealthy(ctx, rte, 10*time.Second)
+			continue
+		}
+		// Exit loop on first valid route
+		break
 	}
 
 	// Connection increment here as we reached destination
