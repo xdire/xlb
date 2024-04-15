@@ -183,6 +183,10 @@ func (lb *LoadBalancer) Listen() error {
 				err = tlsConn.Handshake()
 				if err != nil {
 					lb.logger.Error(fmt.Errorf("cannot complete handshake, %w", err).Error())
+					err = tlsConn.Close()
+					if err != nil {
+						lb.logger.Error(fmt.Errorf("cannot close connection after failed handshake, %w", err).Error())
+					}
 					continue
 				}
 
@@ -190,6 +194,10 @@ func (lb *LoadBalancer) Listen() error {
 				certs := tlsConn.ConnectionState().PeerCertificates
 				if len(certs) == 0 {
 					lb.logger.Error("failed to extract certificate")
+					err = tlsConn.Close()
+					if err != nil {
+						lb.logger.Error(fmt.Errorf("cannot close connection after certificate failure, %w", err).Error())
+					}
 					continue
 				}
 
@@ -226,6 +234,11 @@ func (lb *LoadBalancer) Listen() error {
 								lb.logger.Error(fmt.Errorf("cannot attach to backend, error: %w", err).Error())
 							}
 						}()
+					}
+				} else {
+					err = tlsConn.Close()
+					if err != nil {
+						lb.logger.Error(fmt.Errorf("cannot close connection after identity mismatch, %w", err).Error())
 					}
 				}
 			}
