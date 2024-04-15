@@ -16,7 +16,7 @@ func TestRunningLoadBalancerBaseRouting(t *testing.T) {
 
 	t.Log("test prepare, create TLS files")
 	// Prepare TLS data for the test
-	err := testing2.CreateLocalTLSData()
+	err := testing2.CreateLocalTLSData("test")
 	defer func() {
 		t.Log("test unwind, delete TLS files")
 		out, err := testing2.WipeLocalTLSData("./")

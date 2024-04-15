@@ -50,7 +50,6 @@ func SendRequest(url string) (string, error) {
 		fmt.Println("Error loading certificate and key:", err)
 		return "", err
 	}
-
 	caData, err2 := os.ReadFile("ca.crt")
 	if err2 != nil {
 		return "", fmt.Errorf("cannot read ca certificate for sending the request, error: %w", err)

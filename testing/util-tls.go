@@ -8,14 +8,18 @@ import (
 	"strings"
 )
 
-func CreateLocalTLSData() error {
+func CreateLocalTLSData(identityName string) error {
+
+	if len(identityName) == 0 {
+		identityName = "test"
+	}
 
 	caKey := exec.Command("openssl", "genrsa", "-out", "ca.key", "2048")
 	err := caKey.Run()
 	if err != nil {
 		return err
 	}
-	caCert := exec.Command("openssl", "req", "-x509", "-new", "-nodes", "-key", "ca.key", "-sha256", "-days", "1", "-out", "ca.crt", `-subj`, `/C=US/ST=California/L=Alameda/O=XLB/CN=TESTCA`)
+	caCert := exec.Command("openssl", "req", "-x509", "-new", "-nodes", "-key", "ca.key", "-sha256", "-days", "1", "-out", "ca.crt", `-subj`, `/C=US/ST=California/L=Alameda/O=XLB`)
 	err = caCert.Start()
 	if err != nil {
 		return fmt.Errorf("cannot generate caCert, error: %w", err)
@@ -36,7 +40,7 @@ func CreateLocalTLSData() error {
 		return err
 	}
 
-	srvCSR := exec.Command("openssl", "req", "-new", "-key", "server.key", "-out", "server.csr", "-subj", "/C=US/ST=California/L=Alameda/O=XLB", "-addext", "subjectAltName=DNS:localhost")
+	srvCSR := exec.Command("openssl", "req", "-new", "-key", "server.key", "-out", "server.csr", "-subj", "/C=US/ST=California/L=Alameda/O=XLB")
 	err = srvCSR.Start()
 	if err != nil {
 		return err
@@ -71,7 +75,7 @@ func CreateLocalTLSData() error {
 		return err
 	}
 
-	clientCSR := exec.Command("openssl", "req", "-new", "-key", "client.key", "-out", "client.csr", "-subj", "/C=US/ST=California/L=San Francisco/O=Client Company/CN=test", "-addext", "subjectAltName=DNS:localhost")
+	clientCSR := exec.Command("openssl", "req", "-new", "-key", "client.key", "-out", "client.csr", "-subj", "/C=US/ST=California/L=San Francisco/O=Client Company/CN="+identityName, "-addext", "subjectAltName=DNS:localhost")
 	err = clientCSR.Start()
 	if err != nil {
 		return err
