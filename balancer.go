@@ -12,7 +12,8 @@ import (
 )
 
 type Options struct {
-	logger Logger
+	Logger   Logger
+	LogLevel string
 }
 
 type LoadBalancer struct {
@@ -37,9 +38,9 @@ func NewLoadBalancer(ctx context.Context, cfgPool []ServicePool, opt Options) (*
 		return nil, fmt.Errorf("missing parameter cfgPool")
 	}
 
-	logger := opt.logger
+	logger := opt.Logger
 	if logger == nil {
-		logger = newZeroLogForName("xlb", id.String())
+		logger = newZeroLogForName("xlb", id.String(), opt.LogLevel)
 	}
 
 	poolMap := make(map[string]ServicePool)

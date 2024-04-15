@@ -103,7 +103,7 @@ func main() {
 			SvcRoutes:            pRoutes,
 			Certificate:          string(cert),
 			CertKey:              string(key),
-		}}, xlb.Options{})
+		}}, xlb.Options{LogLevel: "debug"})
 		if err != nil {
 			return
 		}

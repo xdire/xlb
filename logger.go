@@ -9,10 +9,17 @@ type zeroLogger struct {
 	zl zerolog.Logger
 }
 
-func newZeroLogForName(name, id string) zeroLogger {
+func newZeroLogForName(name, id, level string) zeroLogger {
+	zLevel := zerolog.ErrorLevel
+	if len(level) > 0 {
+		newLevel, err := zerolog.ParseLevel(level)
+		if err == nil {
+			zLevel = newLevel
+		}
+	}
 	return zeroLogger{zerolog.New(os.Stdout).
-		Level(zerolog.ErrorLevel).With().Timestamp().
-		Caller().Str("xlb", id).Logger(),
+		Level(zLevel).With().Timestamp().
+		Caller().Str(name, id).Logger(),
 	}
 }
 
