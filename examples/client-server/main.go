@@ -46,7 +46,7 @@ func main() {
 
 	// Prepare routes from flags
 	routes := strings.Split(*routesStr, ",")
-	pRoutes := make([]xlb.Route, 0)
+	pRoutes := make([]xlb.ServicePoolRoute, 0)
 	for _, rte := range routes {
 		if len(rte) == 0 {
 			continue
@@ -94,7 +94,7 @@ func main() {
 			return
 		}
 
-		balancer, err := xlb.NewLoadBalancer(ctx, []xlb.ServicePool{xlb.ServicePoolConfig{
+		balancer, err := xlb.NewLoadBalancer(ctx, []xlb.ServicePool{{
 			SvcIdentity:          "test",
 			SvcPort:              *port,
 			SvcRateQuotaTimes:    *rateQuota,
@@ -154,7 +154,7 @@ func launchClient(targetPort int, threads int) {
 	wg.Wait()
 }
 
-func launchTestServers(ctx context.Context, routes []xlb.Route) error {
+func launchTestServers(ctx context.Context, routes []xlb.ServicePoolRoute) error {
 	// Define context stop logic
 	stopContextFn := make([]func() error, len(routes))
 	defer func() {

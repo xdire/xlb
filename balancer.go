@@ -3,6 +3,7 @@ package xlb
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"github.com/google/uuid"
@@ -15,36 +16,76 @@ import (
 	"time"
 )
 
-type ServicePool interface {
-	// Identity How each ServicePool identified, CN match
-	Identity() string
-	// Port to listen for incoming traffic
-	Port() int
-	// RateQuota Rate of times per time.Duration
-	RateQuota() (int, time.Duration)
-	// Routes to route
-	Routes() []Route
-	// TLSData to service the frontend
-	TLSData() TLSData
-	// UnauthorizedAttempts How many unauthorized attempts before IP cache placement
-	UnauthorizedAttempts() int
-	// HealthCheckValidations Bring host back in routable healthy state after this amount of validations
-	HealthCheckValidations() int
-	// RouteTimeout general timeout for route to be connected or dropped
-	RouteTimeout() time.Duration
+type ServicePool struct {
+	SvcIdentity                string
+	SvcPort                    int
+	SvcRateQuotaTimes          int
+	SvcRateQuotaDuration       time.Duration
+	SvcRoutes                  []ServicePoolRoute
+	Certificate                string
+	CertKey                    string
+	CACert                     string
+	SvcHealthCheckValidations  int
+	SvcHealthCheckRescheduleMs int
+	SvcRouteTimeout            time.Duration
 }
 
-type Route interface {
-	// Path Stores path of the upstream
-	Path() string
-	// Active Provides information if route is active, in case of update
-	// function can provide false and that will adjust behavior of forwarder
-	Active() bool
+func (t ServicePool) GetCertificate() string {
+	return t.Certificate
 }
 
-type TLSData interface {
-	GetCertificate() string
-	GetPrivateKey() string
+func (t ServicePool) GetPrivateKey() string {
+	return t.CertKey
+}
+
+func (t ServicePool) GetCACertificate() string {
+	return t.CACert
+}
+
+func (t ServicePool) Identity() string {
+	return t.SvcIdentity
+}
+
+func (t ServicePool) Port() int {
+	return t.SvcPort
+}
+
+func (t ServicePool) RateQuota() (int, time.Duration) {
+	return t.SvcRateQuotaTimes, t.SvcRateQuotaDuration
+}
+
+func (t ServicePool) Routes() []ServicePoolRoute {
+	return t.SvcRoutes
+}
+
+func (t ServicePool) UnauthorizedAttempts() int {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (t ServicePool) HealthCheckValidations() int {
+	return t.SvcHealthCheckValidations
+}
+
+func (t ServicePool) HealthCheckRescheduleMs() int {
+	return t.SvcHealthCheckRescheduleMs
+}
+
+func (t ServicePool) RouteTimeout() time.Duration {
+	return time.Duration(t.SvcRouteTimeout)
+}
+
+type ServicePoolRoute struct {
+	ServicePath   string
+	ServiceActive bool
+}
+
+func (t ServicePoolRoute) Path() string {
+	return t.ServicePath
+}
+
+func (t ServicePoolRoute) Active() bool {
+	return t.ServiceActive
 }
 
 type Options struct {
@@ -141,20 +182,21 @@ func (lb *LoadBalancer) Listen() error {
 	// Build schedule list not to have thread failures at this stage
 	for port, identity := range mapping {
 
-		pki, err := tlsutil.FromPKI(identity.TLSData().GetCertificate(), identity.TLSData().GetPrivateKey())
+		pki, err := tlsutil.FromPKI(identity.GetCertificate(), identity.GetPrivateKey())
 		if err != nil {
 			return fmt.Errorf("invalid service pool pki data")
 		}
 
+		caCert := identity.GetCACertificate()
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM([]byte(caCert)) {
+			return fmt.Errorf("invalid service pool ca data")
+		}
+
 		config := &tls.Config{
-			Certificates: []tls.Certificate{pki.Certificate},
-			ClientAuth:   tls.RequestClientCert,
-			RootCAs:      pki.CertPool,
-			CipherSuites: []uint16{
-				tls.TLS_AES_128_GCM_SHA256,       // 2022 TLS v1.3 compliant
-				tls.TLS_CHACHA20_POLY1305_SHA256, // 2022 TLS v1.3 compliant
-				tls.TLS_AES_256_GCM_SHA384,       // 2022 TLS v1.3 compliant
-			},
+			Certificates:     []tls.Certificate{pki.Certificate},
+			ClientAuth:       tls.RequireAndVerifyClientCert,
+			ClientCAs:        caCertPool,
 			MinVersion:       tls.VersionTLS13,
 			MaxVersion:       tls.VersionTLS13,
 			CurvePreferences: []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
