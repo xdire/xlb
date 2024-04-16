@@ -5,14 +5,16 @@ import (
 )
 
 type ServicePoolConfig struct {
-	SvcIdentity               string
-	SvcPort                   int
-	SvcRateQuotaTimes         int
-	SvcRateQuotaDuration      time.Duration
-	SvcRoutes                 []Route
-	Certificate               string
-	CertKey                   string
-	SvcHealthCheckValidations int
+	SvcIdentity                string
+	SvcPort                    int
+	SvcRateQuotaTimes          int
+	SvcRateQuotaDuration       time.Duration
+	SvcRoutes                  []Route
+	Certificate                string
+	CertKey                    string
+	SvcHealthCheckValidations  int
+	SvcHealthCheckRescheduleMs int
+	SvcRouteTimeout            time.Duration
 }
 
 func (t ServicePoolConfig) GetCertificate() string {
@@ -52,8 +54,12 @@ func (t ServicePoolConfig) HealthCheckValidations() int {
 	return t.SvcHealthCheckValidations
 }
 
+func (t ServicePoolConfig) HealthCheckRescheduleMs() int {
+	return t.SvcHealthCheckRescheduleMs
+}
+
 func (t ServicePoolConfig) RouteTimeout() time.Duration {
-	return time.Second * 30
+	return time.Duration(t.SvcRouteTimeout)
 }
 
 type ServicePoolRoute struct {

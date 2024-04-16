@@ -30,6 +30,8 @@ type ServicePool interface {
 	UnauthorizedAttempts() int
 	// HealthCheckValidations Bring host back in routable healthy state after this amount of validations
 	HealthCheckValidations() int
+	// HealthCheckValidations Bring host back in routable healthy state after this amount of validations
+	HealthCheckRescheduleMs() int
 	// RouteTimeout general timeout for route to be connected or dropped
 	RouteTimeout() time.Duration
 }

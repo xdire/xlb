@@ -40,6 +40,10 @@ type Forwarder struct {
 // some features like: the least loaded server balancing, health check
 // routing, dynamic route update
 func NewForwarder(params ServicePool, logger zerolog.Logger) *Forwarder {
+	rescheduleTime := params.HealthCheckRescheduleMs()
+	if rescheduleTime == 0 {
+		rescheduleTime = 5000
+	}
 	fwd := &Forwarder{
 		routes: &[]*route{},
 		logger: logger,
@@ -47,7 +51,8 @@ func NewForwarder(params ServicePool, logger zerolog.Logger) *Forwarder {
 			MaxItems:        len(params.Routes()) * 2,
 			Logger:          logger,
 			ReleaseChecks:   params.HealthCheckValidations(),
-			CheckIntervalMs: 5000,
+			CheckIntervalMs: rescheduleTime,
+			MaxWatchers:     len(params.Routes()),
 		}),
 	}
 	// Add strategy linking the forwarder
@@ -141,7 +146,7 @@ func (f *Forwarder) Attach(ctx context.Context, in io.ReadWriteCloser) error {
 		dest, err = net.DialTimeout("tcp", rte.address, f.dialTimeout)
 		if err != nil {
 			f.logger.Err(err).Msgf("route unreachable %s", rte.address)
-			f.health.AddUnhealthy(ctx, rte, 10*time.Second)
+			f.health.AddUnhealthy(ctx, rte, f.dialTimeout)
 			continue
 		}
 		// Exit loop on first valid route
@@ -217,6 +222,8 @@ func (lc leastConnection) Next() *route {
 	}
 	// @ManualTesting
 	// to observe the route to be dispatched in logs, uncomment following line
-	// fmt.Println(fmt.Sprintf("[FORWARDER][STRATEGY][TEST] route selected: %s %d", rte.address, rte.connections))
+	//if rte != nil {
+	//	fmt.Println(fmt.Sprintf("[FORWARDER][STRATEGY][TEST] route selected: %s %d %v", rte.address, rte.connections, rte.healthy.Load()))
+	//}
 	return rte
 }

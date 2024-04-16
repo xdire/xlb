@@ -16,6 +16,7 @@ type HealthSchedulerOptions struct {
 	Logger          zerolog.Logger
 	ReleaseChecks   int
 	CheckIntervalMs int
+	MaxWatchers     int
 }
 
 type HealthCheckScheduler struct {
@@ -28,6 +29,8 @@ type HealthCheckScheduler struct {
 	logger        zerolog.Logger
 	releaseChecks int
 	checkInterval int
+	maxWatchers   uint32
+	curWatchers   uint32
 }
 
 type healthCheckItem struct {
@@ -57,12 +60,16 @@ func NewHealthCheckScheduler(opt HealthSchedulerOptions) *HealthCheckScheduler {
 		logger:        opt.Logger,
 		releaseChecks: releaseChecks,
 		checkInterval: checkIntervalMs,
+		maxWatchers:   uint32(opt.MaxWatchers),
 	}
 }
 
 func (ts *HealthCheckScheduler) AddUnhealthy(ctx context.Context, rte *route, timeout time.Duration) {
-	// Mark unhealthy
-	rte.healthy.Store(false)
+	// Do not accept already unhealthy routes (possibly duplicates) if one cannot change their state
+	// mark unhealthy on CAS
+	if !rte.healthy.CompareAndSwap(true, false) {
+		return
+	}
 	// Add to the scheduler
 	ts.add(&healthCheckItem{func() error {
 		dest, err := net.DialTimeout("tcp", rte.address, timeout)
@@ -77,9 +84,11 @@ func (ts *HealthCheckScheduler) AddUnhealthy(ctx context.Context, rte *route, ti
 		return nil
 	}, 0, 0, rte}, int64(ts.checkInterval))
 
-	// Add routine per health issue, as health issues will be resolved routines eventually will
-	// wind down until none will be left unless new issue arrived
-	go ts.watchRoutine(ctx)
+	nextWatcherNum := atomic.AddUint32(&ts.curWatchers, 1)
+	if nextWatcherNum <= ts.maxWatchers {
+		// Add routine per health issue, however do not exceed max-routine
+		go ts.watchRoutine(ctx)
+	}
 
 }
 
@@ -88,6 +97,7 @@ func (ts *HealthCheckScheduler) watchRoutine(ctx context.Context) {
 		// Await for the scheduler
 		item, err := ts.poll(ctx, 1)
 		if err != nil {
+			atomic.AddUint32(&ts.curWatchers, ^uint32(0))
 			// Context ended return
 			return
 		}
@@ -107,6 +117,7 @@ func (ts *HealthCheckScheduler) watchRoutine(ctx context.Context) {
 		// Check if recovery matching strategy then exit routine
 		if item.success >= ts.releaseChecks {
 			item.route.healthy.Store(true)
+			atomic.AddUint32(&ts.curWatchers, ^uint32(0))
 			return
 		}
 		// If not ready, reschedule
