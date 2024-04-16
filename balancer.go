@@ -17,17 +17,24 @@ import (
 )
 
 type ServicePool struct {
-	SvcIdentity                string
-	SvcPort                    int
-	SvcRateQuotaTimes          int
-	SvcRateQuotaDuration       time.Duration
-	SvcRoutes                  []ServicePoolRoute
-	Certificate                string
-	CertKey                    string
-	CACert                     string
-	SvcHealthCheckValidations  int
-	SvcHealthCheckRescheduleMs int
-	SvcRouteTimeout            time.Duration
+	// How each ServicePool identified, CN match
+	SvcIdentity string
+	// to listen for incoming traffic
+	SvcPort int
+	// Rate per unit of  time.Duration
+	SvcRateQuotaTimes int
+	// Unit of time for rate
+	SvcRateQuotaDuration time.Duration
+	// Where to route this pool
+	SvcRoutes []ServicePoolRoute
+	// String server certificate as it was read from file
+	Certificate string
+	// String server key as it was read from file
+	CertKey string
+	// String CA certificate as it was read from file
+	CACert string
+	// General timeout to call the upstream service
+	SvcRouteTimeout time.Duration
 }
 
 func (t ServicePool) GetCertificate() string {
@@ -61,14 +68,6 @@ func (t ServicePool) Routes() []ServicePoolRoute {
 func (t ServicePool) UnauthorizedAttempts() int {
 	//TODO implement me
 	panic("implement me")
-}
-
-func (t ServicePool) HealthCheckValidations() int {
-	return t.SvcHealthCheckValidations
-}
-
-func (t ServicePool) HealthCheckRescheduleMs() int {
-	return t.SvcHealthCheckRescheduleMs
 }
 
 func (t ServicePool) RouteTimeout() time.Duration {
