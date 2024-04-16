@@ -84,13 +84,13 @@ func main() {
 
 		cert, err := os.ReadFile(*serverCert)
 		if err != nil {
-			log.Fatalf("server certificate not found")
+			log.Fatalf("no server certificate")
 			return
 		}
 
 		key, err := os.ReadFile(*serverKey)
 		if err != nil {
-			log.Fatalf("server key not found")
+			log.Fatalf("no server key")
 			return
 		}
 

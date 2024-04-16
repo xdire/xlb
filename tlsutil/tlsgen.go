@@ -8,6 +8,7 @@ import (
 	"strings"
 )
 
+// CreateLocalTLSData will add the TLS data for local run into execution directory
 func CreateLocalTLSData(identityName string) error {
 
 	if len(identityName) == 0 {
@@ -97,6 +98,7 @@ func CreateLocalTLSData(identityName string) error {
 	return nil
 }
 
+// WipeLocalTLSData will remove all unnecessary data from the execution directory
 func WipeLocalTLSData(dirPath string) ([]string, error) {
 	ext := []string{".key", ".srl", ".crt", ".csr", ".txt"}
 	out := make([]string, 0)

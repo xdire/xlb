@@ -2,7 +2,7 @@ package xlb
 
 import (
 	"context"
-	httputil "github.com/xdire/xlb/httputil"
+	"github.com/xdire/xlb/httputil"
 	"github.com/xdire/xlb/tlsutil"
 	"os"
 	"strconv"
@@ -257,7 +257,7 @@ func TestLoadBalancerHotReloadRouting(t *testing.T) {
 			}
 
 			// each 20th request hot reload the routes, adding more servers to route to
-			if i > 0 && i%20 == 0 && nextPort < 9087 {
+			if i > 0 && i%20 == 0 && nextPort < 9086 {
 				nextPort++
 				servicePool.SvcRoutes = append(servicePool.SvcRoutes, ServicePoolRoute{
 					ServicePath:   "localhost:" + strconv.Itoa(nextPort),
