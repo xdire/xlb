@@ -5,13 +5,14 @@ import (
 )
 
 type ServicePoolConfig struct {
-	SvcIdentity          string
-	SvcPort              int
-	SvcRateQuotaTimes    int
-	SvcRateQuotaDuration time.Duration
-	SvcRoutes            []Route
-	Certificate          string
-	CertKey              string
+	SvcIdentity               string
+	SvcPort                   int
+	SvcRateQuotaTimes         int
+	SvcRateQuotaDuration      time.Duration
+	SvcRoutes                 []Route
+	Certificate               string
+	CertKey                   string
+	SvcHealthCheckValidations int
 }
 
 func (t ServicePoolConfig) GetCertificate() string {
@@ -48,8 +49,7 @@ func (t ServicePoolConfig) UnauthorizedAttempts() int {
 }
 
 func (t ServicePoolConfig) HealthCheckValidations() int {
-	//TODO implement me
-	panic("implement me")
+	return t.SvcHealthCheckValidations
 }
 
 func (t ServicePoolConfig) RouteTimeout() time.Duration {
