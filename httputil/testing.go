@@ -1,7 +1,6 @@
-package testing
+package httputil
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -13,7 +12,7 @@ import (
 	"time"
 )
 
-func CreateTestServer(ctx context.Context, port int, path, response string) (func() error, error) {
+func CreateTestServer(port int, path, response string) (func() error, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/"+path, func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(200 * time.Millisecond)
@@ -25,7 +24,6 @@ func CreateTestServer(ctx context.Context, port int, path, response string) (fun
 		Handler: mux,
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
 	var err error
 
 	go func() {
@@ -36,12 +34,11 @@ func CreateTestServer(ctx context.Context, port int, path, response string) (fun
 	}()
 
 	return func() error {
-		cancel()
-		return srv.Shutdown(ctx)
+		return srv.Close()
 	}, err
 }
 
-func SendRequest(url string) (string, error) {
+func SendTestRequest(url string) (string, error) {
 	// Load certificate and key from a folder
 	certFile := "client.crt"
 	keyFile := "client.key"
