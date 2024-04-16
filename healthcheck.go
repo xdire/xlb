@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"context"
 	"fmt"
+	"github.com/rs/zerolog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -12,7 +13,7 @@ import (
 
 type HealthSchedulerOptions struct {
 	MaxItems        int
-	Logger          Logger
+	Logger          zerolog.Logger
 	ReleaseChecks   int
 	CheckIntervalMs int
 }
@@ -24,7 +25,7 @@ type HealthCheckScheduler struct {
 	nextId        int64
 	isSleeping    int32
 	taskAdded     chan int
-	logger        Logger
+	logger        zerolog.Logger
 	releaseChecks int
 	checkInterval int
 }
@@ -40,12 +41,9 @@ func NewHealthCheckScheduler(opt HealthSchedulerOptions) *HealthCheckScheduler {
 	maxItems := 16
 	releaseChecks := 1
 	checkIntervalMs := 5000
-	var logger Logger
+
 	if opt.MaxItems > 0 {
 		maxItems = opt.MaxItems
-	}
-	if opt.Logger == nil {
-		logger = newZeroLogForName("xlb-hc", "", "error")
 	}
 	if opt.ReleaseChecks > 0 {
 		releaseChecks = opt.ReleaseChecks
@@ -56,7 +54,7 @@ func NewHealthCheckScheduler(opt HealthSchedulerOptions) *HealthCheckScheduler {
 	return &HealthCheckScheduler{
 		Q:             newTaskQueue(maxItems),
 		taskAdded:     make(chan int, 2),
-		logger:        logger,
+		logger:        opt.Logger,
 		releaseChecks: releaseChecks,
 		checkInterval: checkIntervalMs,
 	}
@@ -69,7 +67,7 @@ func (ts *HealthCheckScheduler) AddUnhealthy(ctx context.Context, rte *route, ti
 	ts.add(&healthCheckItem{func() error {
 		dest, err := net.DialTimeout("tcp", rte.address, timeout)
 		if err != nil {
-			ts.logger.Error(fmt.Sprintf("HC@route unreachable %s", rte.address))
+			ts.logger.Error().Msgf("HC@route unreachable %s", rte.address)
 			return err
 		}
 		err = dest.Close()
@@ -124,7 +122,7 @@ func (ts *HealthCheckScheduler) add(task *healthCheckItem, after int64) {
 		Value:    task,
 		Priority: time.Now().UTC().Add(time.Duration(after) * time.Millisecond).Unix(),
 	}
-	ts.logger.Debug(fmt.Sprintf("HC@Offer expiration offered as %d time: %d", after, item.Priority))
+	ts.logger.Debug().Msgf("HC@Offer expiration offered as %d time: %d", after, item.Priority)
 	ts.mu.Lock()
 	heap.Push(&ts.Q, item)
 	ts.mu.Unlock()
@@ -156,7 +154,7 @@ func (ts *HealthCheckScheduler) poll(ctx context.Context, pollerId int) (*health
 			// Wait for semaphore to unlock
 			select {
 			case <-ts.taskAdded:
-				ts.logger.Debug(fmt.Sprintf("HC@Poller <%d> Called out on task added", pollerId))
+				ts.logger.Debug().Msgf("HC@Poller <%d> Called out on task added", pollerId)
 				break
 			case <-ctx.Done():
 				return nil, fmt.Errorf("context ended for the Poll action")
@@ -172,7 +170,7 @@ func (ts *HealthCheckScheduler) poll(ctx context.Context, pollerId int) (*health
 			if task.Priority <= isNow {
 				i = heap.Pop(&ts.Q)
 				ts.mu.Unlock()
-				ts.logger.Debug(fmt.Sprintf("HC@Poller <%d> poll dequeue id <%d> at <%d> system <%d> loadIter <%d>", pollerId, task.Id, task.Priority, isNow, iteratedOnTask))
+				ts.logger.Debug().Msgf("HC@Poller <%d> poll dequeue id <%d> at <%d> system <%d> loadIter <%d>", pollerId, task.Id, task.Priority, isNow, iteratedOnTask)
 				return task.Value.(*healthCheckItem), nil
 			} else {
 				// If Task should await for the next moment
@@ -180,11 +178,11 @@ func (ts *HealthCheckScheduler) poll(ctx context.Context, pollerId int) (*health
 				select {
 				// Wait for general condition unlock
 				case <-ts.taskAdded:
-					ts.logger.Debug(fmt.Sprintf("HC@Poller <%d> Called out on task added", pollerId))
+					ts.logger.Debug().Msgf("HC@Poller <%d> Called out on task added", pollerId)
 					continue
 				// Delay next checkup
 				case <-time.After(time.Duration(task.Priority-isNow) * time.Millisecond * 1000):
-					ts.logger.Debug(fmt.Sprintf("HC@Poller <%d> Called out on time duration block end", pollerId))
+					ts.logger.Debug().Msgf("HC@Poller <%d> Called out on time duration block end", pollerId)
 					continue
 				case <-ctx.Done():
 					return nil, fmt.Errorf("context ended for the Poll action")

@@ -2,13 +2,20 @@ package xlb
 
 import (
 	"context"
-	"crypto/tls"
+	"errors"
 	"fmt"
+	"github.com/rs/zerolog"
 	"io"
+	"math"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+)
+
+const (
+	closedNetworkConnection = "use of closed network connection"
 )
 
 type route struct {
@@ -23,12 +30,16 @@ type Forwarder struct {
 	mutex       sync.RWMutex
 	updateLock  bool
 	strategy    leastConnection
-	logger      Logger
+	logger      zerolog.Logger
 	dialTimeout time.Duration
 	health      *HealthCheckScheduler
 }
 
-func NewForwarder(params ServicePool, logger Logger) *Forwarder {
+// NewForwarder creates load balancer forwarder that can be used to
+// establish proxy communication between client and destination, adding
+// some features like: the least loaded server balancing, health check
+// routing, dynamic route update
+func NewForwarder(params ServicePool, logger zerolog.Logger) *Forwarder {
 	fwd := &Forwarder{
 		routes: &[]*route{},
 		logger: logger,
@@ -67,9 +78,8 @@ func NewForwarder(params ServicePool, logger Logger) *Forwarder {
 	return fwd
 }
 
-// UpdateServicePool
-// Will update current service pool with the set of new routes or other information
-// and do hotswap for the active routes in dispatch
+// UpdateServicePool will update service pool merging the new pool routes
+// configuration with existing routes
 func (f *Forwarder) UpdateServicePool(pool ServicePool) {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
@@ -107,20 +117,14 @@ func (f *Forwarder) UpdateServicePool(pool ServicePool) {
 		rte.active.Store(false)
 	}
 	f.routes = &newRoutePool
-	f.logger.Info(fmt.Sprintf("forwarder routes updated to: %+v from: %+v", *f.routes, pool.Routes()))
+	f.logger.Info().Msgf("forwarder routes updated to: %+v from: %+v", *f.routes, pool.Routes())
 }
 
-// Attach
-// Attaches provided in channel to the one of the destinations behind the load balancer
-func (f *Forwarder) Attach(ctx context.Context, in *tls.Conn) error {
+// Attach will attach some incoming session to the pool of upstream traffic distribution
+func (f *Forwarder) Attach(ctx context.Context, in io.ReadWriteCloser) error {
 
 	errTransport := make(chan error, 2)
-	defer func(conn net.Conn) {
-		err := conn.Close()
-		if err != nil {
-			f.logger.Debug(fmt.Sprintf("forwarder conn closed: %s", in.LocalAddr().String()))
-		}
-	}(in)
+	defer in.Close()
 
 	var rte *route
 	var dest net.Conn
@@ -136,7 +140,7 @@ func (f *Forwarder) Attach(ctx context.Context, in *tls.Conn) error {
 
 		dest, err = net.DialTimeout("tcp", rte.address, f.dialTimeout)
 		if err != nil {
-			f.logger.Error(fmt.Sprintf("route unreachable %s", rte.address))
+			f.logger.Err(err).Msgf("route unreachable %s", rte.address)
 			f.health.AddUnhealthy(ctx, rte, 10*time.Second)
 			continue
 		}
@@ -144,15 +148,21 @@ func (f *Forwarder) Attach(ctx context.Context, in *tls.Conn) error {
 		break
 	}
 
+	defer dest.Close()
+
 	// Connection increment here as we reached destination
 	atomic.AddUint32(&rte.connections, 1)
 
-	go func(w io.Writer, r io.Reader) {
+	go func(w io.WriteCloser, r io.ReadCloser) {
+		defer w.Close()
+		defer r.Close()
 		_, err := io.Copy(w, r)
 		errTransport <- err
 	}(dest, in)
 
-	go func(w io.Writer, r io.Reader) {
+	go func(w io.WriteCloser, r io.ReadCloser) {
+		defer w.Close()
+		defer r.Close()
 		_, err := io.Copy(w, r)
 		errTransport <- err
 	}(in, dest)
@@ -163,7 +173,9 @@ func (f *Forwarder) Attach(ctx context.Context, in *tls.Conn) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case err = <-errTransport:
-			if err != nil {
+			// If detected error, check that error has nature of a normal behavior in the system
+			// and will not affect the further behavior
+			if err != nil && !(errors.Is(err, io.EOF) || strings.Contains(err.Error(), closedNetworkConnection)) {
 				errs = append(errs, err)
 			}
 		}
@@ -182,8 +194,10 @@ type leastConnection struct {
 	fwd *Forwarder
 }
 
+// Next will make selection of the next route using the algorithm of least
+// utilization (from the standpoint of this system) of the host connectivity
 func (lc leastConnection) Next() *route {
-	minVal := uint32(32000)
+	minVal := uint32(math.MaxUint32)
 
 	// Lock and unlock just to get access to the latest routes slice
 	// this delivers support for hot-reload of the routes by pointer refresh
