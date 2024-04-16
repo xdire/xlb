@@ -54,7 +54,9 @@ func SendTestRequest(url string) (string, error) {
 
 	// Configure TLS client
 	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(caData)
+	if !pool.AppendCertsFromPEM(caData) {
+		return "", fmt.Errorf("cannot append ca certificate to cert pool")
+	}
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		RootCAs:      pool,
@@ -79,8 +81,7 @@ func SendTestRequest(url string) (string, error) {
 	// client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Println("Error sending HTTPS request:", err)
-		return "", err
+		return "", fmt.Errorf("error sending HTTPS request, error: %w", err)
 	}
 
 	defer func(Body io.ReadCloser) {

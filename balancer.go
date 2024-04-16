@@ -35,6 +35,10 @@ type ServicePool struct {
 	CACert string
 	// General timeout to call the upstream service
 	SvcRouteTimeout time.Duration
+  // How many times server need to be revalidated before get healthy again
+  SvcHealthCheckValidations  int
+  // How often Health check scheduler should check up on the server (1000ms or greater for optimal performance)
+	SvcHealthCheckRescheduleMs int
 }
 
 func (t ServicePool) GetCertificate() string {
@@ -68,6 +72,14 @@ func (t ServicePool) Routes() []ServicePoolRoute {
 func (t ServicePool) UnauthorizedAttempts() int {
 	//TODO implement me
 	panic("implement me")
+}
+
+func (t ServicePool) HealthCheckValidations() int {
+	return t.SvcHealthCheckValidations
+}
+
+func (t ServicePool) HealthCheckRescheduleMs() int {
+	return t.SvcHealthCheckRescheduleMs
 }
 
 func (t ServicePool) RouteTimeout() time.Duration {
