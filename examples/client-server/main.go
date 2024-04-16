@@ -5,22 +5,21 @@ import (
 	"flag"
 	"fmt"
 	"github.com/xdire/xlb"
-	testUtil "github.com/xdire/xlb/testing"
+	testUtil "github.com/xdire/xlb/httputil"
+	"github.com/xdire/xlb/tlsutil"
 	"log"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
 func main() {
 
-	ctx, cancelAll := context.WithCancel(context.Background())
-	defer cancelAll()
-	signals(cancelAll)
+	ctx, cancelCtx := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+	defer cancelCtx()
 
 	// Flags for pre-generate TLS data and identity
 	identity := flag.String("id", "test", "Identity name to match for certificates")
@@ -52,7 +51,7 @@ func main() {
 		if len(rte) == 0 {
 			continue
 		}
-		pRoutes = append(pRoutes, testUtil.TestServicePoolRoute{
+		pRoutes = append(pRoutes, xlb.ServicePoolRoute{
 			ServicePath:   rte,
 			ServiceActive: true,
 		})
@@ -60,7 +59,7 @@ func main() {
 
 	// Generate TLS data in folder
 	if *optionGenTLS {
-		err := testUtil.CreateLocalTLSData(*identity)
+		err := tlsutil.CreateLocalTLSData(*identity)
 		if err != nil {
 			log.Fatalf("cannot generate TLS data, error: %+v", err)
 		}
@@ -68,7 +67,7 @@ func main() {
 
 	// Clean TLS data in folder
 	if *optionWipeTLS {
-		removed, err := testUtil.WipeLocalTLSData("./")
+		removed, err := tlsutil.WipeLocalTLSData("./")
 		if err != nil {
 			log.Fatalf("cannot generate TLS data, error: %+v", err)
 		}
@@ -95,7 +94,7 @@ func main() {
 			return
 		}
 
-		balancer, err := xlb.NewLoadBalancer(ctx, []xlb.ServicePool{testUtil.TestServicePoolConfig{
+		balancer, err := xlb.NewLoadBalancer(ctx, []xlb.ServicePool{xlb.ServicePoolConfig{
 			SvcIdentity:          "test",
 			SvcPort:              *port,
 			SvcRateQuotaTimes:    *rateQuota,
@@ -142,14 +141,14 @@ func launchClient(targetPort int, threads int) {
 	for i := 0; i < threads; i++ {
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			// Test load balancer
-			res, err := testUtil.SendRequest("https://localhost:" + strconv.Itoa(targetPort) + "/api")
+			res, err := testUtil.SendTestRequest("https://localhost:" + strconv.Itoa(targetPort) + "/api")
 			if err != nil {
 				log.Printf(fmt.Errorf("cannot reach remotes, error: %w", err).Error())
 			} else {
 				log.Println(res)
 			}
-			wg.Done()
 		}()
 	}
 	wg.Wait()
@@ -157,7 +156,7 @@ func launchClient(targetPort int, threads int) {
 
 func launchTestServers(ctx context.Context, routes []xlb.Route) error {
 	// Define context stop logic
-	stopContextFn := make([]func() error, 0)
+	stopContextFn := make([]func() error, len(routes))
 	defer func() {
 		for _, fn := range stopContextFn {
 			err := fn()
@@ -179,22 +178,12 @@ func launchTestServers(ctx context.Context, routes []xlb.Route) error {
 			return fmt.Errorf("cannot detect port in %s", err)
 		}
 		log.Println("starting test server at port", port)
-		stopServerFn, err := testUtil.CreateTestServer(ctx, port, "api", fmt.Sprintf("Server %d responded", i))
+		stopServerFn, err := testUtil.CreateTestServer(port, "api", fmt.Sprintf("Server %d responded", i))
 		if err != nil {
 			log.Fatalf("Failed to start test server %d: %+v", i, err)
 		}
-		stopContextFn = append(stopContextFn, stopServerFn)
+		stopContextFn[i] = stopServerFn
 	}
 	<-ctx.Done()
 	return nil
-}
-
-func signals(cancelFunc context.CancelFunc) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGABRT)
-	go func() {
-		sig := <-sigCh
-		log.Printf("\nexited with signal %v", sig)
-		cancelFunc()
-	}()
 }

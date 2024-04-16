@@ -3,16 +3,52 @@ package xlb
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/xdire/xlb/tlsutil"
 	"net"
+	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
+type ServicePool interface {
+	// Identity How each ServicePool identified, CN match
+	Identity() string
+	// Port to listen for incoming traffic
+	Port() int
+	// RateQuota Rate of times per time.Duration
+	RateQuota() (int, time.Duration)
+	// Routes to route
+	Routes() []Route
+	// TLSData to service the frontend
+	TLSData() TLSData
+	// UnauthorizedAttempts How many unauthorized attempts before IP cache placement
+	UnauthorizedAttempts() int
+	// HealthCheckValidations Bring host back in routable healthy state after this amount of validations
+	HealthCheckValidations() int
+	// RouteTimeout general timeout for route to be connected or dropped
+	RouteTimeout() time.Duration
+}
+
+type Route interface {
+	// Path Stores path of the upstream
+	Path() string
+	// Active Provides information if route is active, in case of update
+	// function can provide false and that will adjust behavior of forwarder
+	Active() bool
+}
+
+type TLSData interface {
+	GetCertificate() string
+	GetPrivateKey() string
+}
+
 type Options struct {
-	Logger   Logger
+	Logger   *zerolog.Logger
 	LogLevel string
 }
 
@@ -20,12 +56,17 @@ type LoadBalancer struct {
 	id           string
 	runCtx       context.Context
 	killCtx      context.CancelFunc
-	logger       Logger
+	logger       zerolog.Logger
 	poolMap      map[string]ServicePool
 	forwarderMap map[string]*Forwarder
 	mutex        sync.Mutex
 }
 
+// NewLoadBalancer creates new instance of the load balancer
+// using array of pool configuration. For each pool it is
+// assumed that it has unique port, otherwise Listen will
+// fail with the error
+// TODO: Add checkup in constructor for enforce unique port per pool configuration
 func NewLoadBalancer(ctx context.Context, cfgPool []ServicePool, opt Options) (*LoadBalancer, error) {
 	id, err := uuid.NewRandom()
 	if err != nil {
@@ -38,9 +79,9 @@ func NewLoadBalancer(ctx context.Context, cfgPool []ServicePool, opt Options) (*
 		return nil, fmt.Errorf("missing parameter cfgPool")
 	}
 
-	logger := opt.Logger
-	if logger == nil {
-		logger = newZeroLogForName("xlb", id.String(), opt.LogLevel)
+	logger := newZeroLogForName("xlb", id.String(), opt.LogLevel)
+	if opt.Logger != nil {
+		logger = *opt.Logger
 	}
 
 	poolMap := make(map[string]ServicePool)
@@ -62,6 +103,9 @@ func NewLoadBalancer(ctx context.Context, cfgPool []ServicePool, opt Options) (*
 	}, nil
 }
 
+// UpdatePool will update pool using pool.Identity() method, this will
+// trigger hot-swap operation on running forwarder for pool and should
+// replace targets behind the load balancer without the restart
 func (lb *LoadBalancer) UpdatePool(pool ServicePool) error {
 	if len(pool.Identity()) == 0 {
 		return fmt.Errorf("pool missing identity")
@@ -92,8 +136,8 @@ func (lb *LoadBalancer) Listen() error {
 		tls  *tls.Config
 		pool ServicePool
 	}
-	scheduleListeners := make([]schedule, 0)
-
+	scheduleListeners := make([]schedule, len(mapping))
+	i := 0
 	// Build schedule list not to have thread failures at this stage
 	for port, identity := range mapping {
 
@@ -116,7 +160,8 @@ func (lb *LoadBalancer) Listen() error {
 			CurvePreferences: []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
 		}
 
-		scheduleListeners = append(scheduleListeners, schedule{port, config, identity})
+		scheduleListeners[i] = schedule{port, config, identity}
+		i++
 	}
 
 	// Schedule listeners one by one and fail if any of them fail
@@ -126,9 +171,9 @@ func (lb *LoadBalancer) Listen() error {
 
 	wg := sync.WaitGroup{}
 	for _, params := range scheduleListeners {
+		wg.Add(1)
 		go func(ctx context.Context, cancelAll context.CancelFunc, errChan chan error, toSchedule schedule) {
 
-			wg.Add(1)
 			// Don't forget to close all contexts
 			defer derCancel()
 			// Try to listen
@@ -146,13 +191,13 @@ func (lb *LoadBalancer) Listen() error {
 				// Await for context break
 				<-ctx.Done()
 				err := listen.Close()
-				lb.logger.Info(fmt.Sprintf("closing listener at port %d", toSchedule.port))
+				lb.logger.Info().Msgf("closing listener at port %d", toSchedule.port)
 				if err != nil {
-					lb.logger.Error(fmt.Sprintf("error closing listener at port %d", toSchedule.port))
+					lb.logger.Err(err).Msgf("error closing listener at port %d", toSchedule.port)
 				}
 			}(listen)
 
-			lb.logger.Info(fmt.Sprintf("listening at port %d", toSchedule.port))
+			lb.logger.Info().Msgf("listening at port %d", toSchedule.port)
 
 			// Bind pool and forwarder
 			currentPool := toSchedule.pool
@@ -165,27 +210,29 @@ func (lb *LoadBalancer) Listen() error {
 				if err != nil {
 					if strings.Contains(err.Error(), "closed network") {
 						// Graceful
-						lb.logger.Debug(fmt.Sprintf("listener closed, closed network for port: %d", toSchedule.port))
+						lb.logger.Debug().Msgf("listener closed, closed network for port: %d", toSchedule.port)
 						errChan <- nil
 					} else {
 						// Other kind of error
-						lb.logger.Error(fmt.Errorf("failed to accept connection, error: %w", err).Error())
+						lb.logger.Err(err).Msgf("failed to accept connection, error")
 						errChan <- fmt.Errorf("failed to listen on port, error: %w", err)
 					}
+					lb.mutex.Lock()
 					delete(lb.forwarderMap, currentPool.Identity())
+					lb.mutex.Unlock()
 					return
 				}
 
-				lb.logger.Debug(fmt.Sprintf("accepting request for port %d", toSchedule.port))
+				lb.logger.Debug().Msgf("accepting request for port %d", toSchedule.port)
 
 				// Convert to TLS and proceed with the handshake
 				tlsConn := conn.(*tls.Conn)
 				err = tlsConn.Handshake()
 				if err != nil {
-					lb.logger.Error(fmt.Errorf("cannot complete handshake, %w", err).Error())
+					lb.logger.Err(err).Msg("cannot complete handshake")
 					err = tlsConn.Close()
 					if err != nil {
-						lb.logger.Error(fmt.Errorf("cannot close connection after failed handshake, %w", err).Error())
+						lb.logger.Err(err).Msg("cannot close connection after failed handshake")
 					}
 					continue
 				}
@@ -193,10 +240,10 @@ func (lb *LoadBalancer) Listen() error {
 				// Verify certificate CN and find or create corresponding backend to dispatch
 				certs := tlsConn.ConnectionState().PeerCertificates
 				if len(certs) == 0 {
-					lb.logger.Error("failed to extract certificate")
+					lb.logger.Error().Msg("failed to extract certificate")
 					err = tlsConn.Close()
 					if err != nil {
-						lb.logger.Error(fmt.Errorf("cannot close connection after certificate failure, %w", err).Error())
+						lb.logger.Err(err).Msg("cannot close connection after certificate failure")
 					}
 					continue
 				}
@@ -212,33 +259,33 @@ func (lb *LoadBalancer) Listen() error {
 						go func() {
 							err := forwarder.Attach(ctx, tlsConn)
 							if err != nil {
-								if err.Error() == "context canceled" {
-									lb.logger.Error("conn closing gracefully on context")
+								if errors.Is(err, context.Canceled) {
+									lb.logger.Err(err).Msg("conn closing gracefully on context")
 									return
 								}
-								lb.logger.Error(fmt.Errorf("cannot attach to backend, error: %w", err).Error())
+								lb.logger.Err(err).Msg("cannot attach to backend")
 							}
 						}()
 					} else {
-						forwarder = NewForwarder(ctx, currentPool, lb.logger)
+						forwarder = NewForwarder(currentPool, lb.logger)
 						lb.mutex.Lock()
 						lb.forwarderMap[currentPool.Identity()] = forwarder
 						lb.mutex.Unlock()
 						go func() {
 							err := forwarder.Attach(ctx, tlsConn)
 							if err != nil {
-								if err.Error() == "context canceled" {
-									lb.logger.Error("conn closing gracefully on context")
+								if errors.Is(err, context.Canceled) {
+									lb.logger.Err(err).Msg("conn closing gracefully on context")
 									return
 								}
-								lb.logger.Error(fmt.Errorf("cannot attach to backend, error: %w", err).Error())
+								lb.logger.Err(err).Msgf("cannot attach to backend")
 							}
 						}()
 					}
 				} else {
 					err = tlsConn.Close()
 					if err != nil {
-						lb.logger.Error(fmt.Errorf("cannot close connection after identity mismatch, %w", err).Error())
+						lb.logger.Err(err).Msg("cannot close connection after identity mismatch")
 					}
 				}
 			}
@@ -266,4 +313,17 @@ func collectListenTargets(fromData map[string]ServicePool) (map[int]ServicePool,
 		return nil, fmt.Errorf("more than one service pool per port")
 	}
 	return portMap, nil
+}
+
+func newZeroLogForName(name, id, level string) zerolog.Logger {
+	zLevel := zerolog.ErrorLevel
+	if len(level) > 0 {
+		newLevel, err := zerolog.ParseLevel(level)
+		if err == nil {
+			zLevel = newLevel
+		}
+	}
+	return zerolog.New(os.Stdout).
+		Level(zLevel).With().Timestamp().
+		Caller().Str(name, id).Logger()
 }
