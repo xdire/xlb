@@ -208,7 +208,7 @@ func (lc leastConnection) Next() *route {
 	// this delivers support for hot-reload of the routes by pointer refresh
 	// leastConnection might work for one cycle with outdated records
 	lc.fwd.mutex.RLock()
-	lc.fwd.mutex.RUnlock()
+	defer lc.fwd.mutex.RUnlock()
 
 	var rte *route
 	for _, route := range *lc.fwd.routes {
