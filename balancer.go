@@ -245,6 +245,7 @@ func (lb *LoadBalancer) Listen() error {
 			var forwarder *Forwarder
 
 			// Calculate Rate Quota or take a default of defaultRequestPerSecondRate rps
+			// TODO: Provide ability to hot reload rate quotas per pool
 			times, perTimeUnit := toSchedule.pool.RateQuota()
 			if times == 0 {
 				times = defaultRequestPerSecondRate
