@@ -77,7 +77,7 @@ func TestRunningLoadBalancerBaseRouting(t *testing.T) {
 	balancer, err := NewLoadBalancer(ctx, []ServicePool{{
 		SvcIdentity:          "test",
 		SvcPort:              9092,
-		SvcRateQuotaTimes:    10,
+		SvcRateQuotaTimes:    1000,
 		SvcRateQuotaDuration: time.Second * 1,
 		SvcRoutes: []ServicePoolRoute{
 			ServicePoolRoute{
