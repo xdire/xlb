@@ -290,6 +290,7 @@ func (lb *LoadBalancer) Listen() error {
 				if !rateLimiter.WithinRateLimit() {
 					lb.logger.Trace().Msgf("rate quota exceeded for pool: %s", toSchedule.pool.Identity())
 					// TODO Provide notification pipeline abstraction where certain events can be dumped for behavior adjustments
+					// example: notify.Submit(RateLimitNotification{identity,quota,time})
 					err = tlsConn.Close()
 					if err != nil {
 						lb.logger.Err(err).Msg("cannot close connection on rate quota limit")
