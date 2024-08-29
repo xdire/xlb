@@ -16,6 +16,12 @@ import (
 	"time"
 )
 
+const (
+	defaultRequestPerSecondRate = 1000
+)
+
+// ServicePool structure that describes the unit of services
+// where traffic can be routed using mTLS verification
 type ServicePool struct {
 	// How each ServicePool identified, CN match
 	SvcIdentity string
@@ -35,75 +41,57 @@ type ServicePool struct {
 	CACert string
 	// General timeout to call the upstream service
 	SvcRouteTimeout time.Duration
-  // How many times server need to be revalidated before get healthy again
-  SvcHealthCheckValidations  int
-  // How often Health check scheduler should check up on the server (1000ms or greater for optimal performance)
+	// How many times server need to be revalidated before get healthy again
+	SvcHealthCheckValidations int
+	// How often Health check scheduler should check up on the server (1000ms or greater for optimal performance)
 	SvcHealthCheckRescheduleMs int
 }
 
-func (t ServicePool) GetCertificate() string {
-	return t.Certificate
-}
+func (t ServicePool) GetCertificate() string { return t.Certificate }
 
-func (t ServicePool) GetPrivateKey() string {
-	return t.CertKey
-}
+func (t ServicePool) GetPrivateKey() string { return t.CertKey }
 
-func (t ServicePool) GetCACertificate() string {
-	return t.CACert
-}
+func (t ServicePool) GetCACertificate() string { return t.CACert }
 
-func (t ServicePool) Identity() string {
-	return t.SvcIdentity
-}
+func (t ServicePool) Identity() string { return t.SvcIdentity }
 
-func (t ServicePool) Port() int {
-	return t.SvcPort
-}
+func (t ServicePool) Port() int { return t.SvcPort }
 
 func (t ServicePool) RateQuota() (int, time.Duration) {
 	return t.SvcRateQuotaTimes, t.SvcRateQuotaDuration
 }
 
-func (t ServicePool) Routes() []ServicePoolRoute {
-	return t.SvcRoutes
-}
+func (t ServicePool) Routes() []ServicePoolRoute { return t.SvcRoutes }
 
 func (t ServicePool) UnauthorizedAttempts() int {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (t ServicePool) HealthCheckValidations() int {
-	return t.SvcHealthCheckValidations
-}
+func (t ServicePool) HealthCheckValidations() int { return t.SvcHealthCheckValidations }
 
-func (t ServicePool) HealthCheckRescheduleMs() int {
-	return t.SvcHealthCheckRescheduleMs
-}
+func (t ServicePool) HealthCheckRescheduleMs() int { return t.SvcHealthCheckRescheduleMs }
 
-func (t ServicePool) RouteTimeout() time.Duration {
-	return time.Duration(t.SvcRouteTimeout)
-}
+func (t ServicePool) RouteTimeout() time.Duration { return t.SvcRouteTimeout }
 
 type ServicePoolRoute struct {
 	ServicePath   string
 	ServiceActive bool
 }
 
-func (t ServicePoolRoute) Path() string {
-	return t.ServicePath
-}
+func (t ServicePoolRoute) Path() string { return t.ServicePath }
 
-func (t ServicePoolRoute) Active() bool {
-	return t.ServiceActive
-}
+func (t ServicePoolRoute) Active() bool { return t.ServiceActive }
 
 type Options struct {
-	Logger   *zerolog.Logger
+	// Provide the reference for the logger instance
+	Logger *zerolog.Logger
+	// Log level as trace,debug,info,error
 	LogLevel string
 }
 
+// LoadBalancer provides capability to accept the traffic and route it
+// to the pool of upstream servers
 type LoadBalancer struct {
 	id           string
 	runCtx       context.Context
@@ -256,6 +244,14 @@ func (lb *LoadBalancer) Listen() error {
 			currentPool := toSchedule.pool
 			var forwarder *Forwarder
 
+			// Calculate Rate Quota or take a default of defaultRequestPerSecondRate rps
+			// TODO: Provide ability to hot reload rate quotas per pool
+			times, perTimeUnit := toSchedule.pool.RateQuota()
+			if times == 0 {
+				times = defaultRequestPerSecondRate
+			}
+			rateLimiter := NewTokenBucket(uint32(times), perTimeUnit)
+
 			// Maintain incoming connections
 			for {
 
@@ -286,6 +282,19 @@ func (lb *LoadBalancer) Listen() error {
 					err = tlsConn.Close()
 					if err != nil {
 						lb.logger.Err(err).Msg("cannot close connection after failed handshake")
+					}
+					continue
+				}
+
+				// As pool using the mTLS for the identity verification (at this moment port->creds)
+				// it seems to be logical to apply the Rate quotas right after the verified credentials
+				if !rateLimiter.WithinRateLimit() {
+					lb.logger.Trace().Msgf("rate quota exceeded for pool: %s", toSchedule.pool.Identity())
+					// TODO Provide notification pipeline abstraction where certain events can be dumped for behavior adjustments
+					// example: notify.Submit(RateLimitNotification{identity,quota,time})
+					err = tlsConn.Close()
+					if err != nil {
+						lb.logger.Err(err).Msg("cannot close connection on rate quota limit")
 					}
 					continue
 				}
@@ -336,10 +345,14 @@ func (lb *LoadBalancer) Listen() error {
 						}()
 					}
 				} else {
+
+					// TODO Add here the rate limiting for incorrect matches, possibly placing them into the LRU cache with bad IP address match
+					lb.logger.Warn().Msgf("certificate failed identity matching %s", identity)
 					err = tlsConn.Close()
 					if err != nil {
 						lb.logger.Err(err).Msg("cannot close connection after identity mismatch")
 					}
+
 				}
 			}
 
@@ -353,6 +366,44 @@ func (lb *LoadBalancer) Listen() error {
 		return fmt.Errorf("failed to listen for one of the ports, all listeners will shutdown, error: %w", err)
 	}
 	return nil
+}
+
+// TokenBucket Not a thread safe rate limiting object, provides capability to
+// count the rate of calls for Allowed() method with decision
+// if call fits within certain limits or not
+type TokenBucket struct {
+	tokens   uint32
+	bucket   uint32
+	timeUnit time.Duration
+	updated  time.Time
+}
+
+// NewTokenBucket create new token bucket with required params to operate
+func NewTokenBucket(tokens uint32, timeUnit time.Duration) *TokenBucket {
+	return &TokenBucket{bucket: tokens, tokens: tokens, timeUnit: timeUnit, updated: time.Now()}
+}
+
+// WithinRateLimit get the bool decision if this call within rate limit or not
+func (t *TokenBucket) WithinRateLimit() bool {
+	curTime := time.Now()
+	passTime := curTime.Sub(t.updated)
+	t.updated = curTime
+
+	tu := t.timeUnit.Seconds()
+	// Calculate as following:
+	// r.tokens/tu -> 10/time-unit -> 10/1 sec -> 10 in 1 second
+	// passed time -> 0.2sec * 10 in one sec = +2 units
+	t.bucket = t.bucket + uint32(passTime.Seconds()*(float64(t.tokens)/tu))
+
+	if t.bucket > t.tokens {
+		t.bucket = t.tokens
+	}
+
+	if t.bucket < 1 {
+		return false
+	}
+	t.bucket--
+	return true
 }
 
 // Collect all the targets in correlation to the ports they're running at
