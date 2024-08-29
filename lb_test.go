@@ -309,3 +309,277 @@ func TestLoadBalancerHotReloadRouting(t *testing.T) {
 	// Let everything unwind gracefully
 	<-time.After(time.Second * 5)
 }
+
+// TestLoadBalancerHealthCheckFlow
+// Will test how servers will interact with the health check service in terms of
+// - shutdown
+// - restore
+// - balancing after the restore event
+func TestLoadBalancerHealthCheckFlow(t *testing.T) {
+	ctx, cancelAll := context.WithCancel(context.Background())
+	defer cancelAll()
+
+	t.Log("test prepare, create TLS files")
+	// Prepare TLS data for the test
+	err := tlsutil.CreateLocalTLSData("test")
+	defer func() {
+		t.Log("test unwind, delete TLS files")
+		out, err := tlsutil.WipeLocalTLSData("./")
+		if err != nil {
+			t.Error("cannot clean pre-arranged test files")
+		}
+		t.Logf("files deleted: %+v", out)
+	}()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Prepare responding servers for the test
+	// TODO: Optimize tests in the way to obtain random ranges for ports to configure LB and test targets
+	t.Log("test prepare, create responding servers")
+	stopServer1, err := httputil.CreateTestServer(9087, "api", "Server 1 responded")
+	if err != nil {
+		t.Errorf("Failed to start test server 1: %v", err)
+	}
+	defer stopServer1()
+	stopServer2, err := httputil.CreateTestServer(9088, "api", "Server 2 responded")
+	if err != nil {
+		t.Errorf("Failed to start test server 2: %v", err)
+	}
+	defer stopServer2()
+	stopServer3, err := httputil.CreateTestServer(9089, "api", "Server 3 responded")
+	if err != nil {
+		t.Errorf("Failed to start test server 3: %v", err)
+	}
+	defer stopServer3()
+	stopServer4, err := httputil.CreateTestServer(9090, "api", "Server 4 responded")
+	if err != nil {
+		t.Errorf("Failed to start test server 3: %v", err)
+	}
+	defer stopServer4()
+
+	// Order to switch servers offline
+	windDownChan := make(chan func() error, 4)
+	windDownChan <- stopServer1
+	windDownChan <- stopServer2
+	windDownChan <- stopServer3
+	windDownChan <- stopServer4
+
+	// Order to bring servers back online
+	scaleUpChan := make(chan func() (func() error, error), 4)
+	scaleUpChan <- func() (func() error, error) {
+		return httputil.CreateTestServer(9087, "api", "Server 1 after scale")
+	}
+	scaleUpChan <- func() (func() error, error) {
+		return httputil.CreateTestServer(9088, "api", "Server 2 after scale")
+	}
+	scaleUpChan <- func() (func() error, error) {
+		return httputil.CreateTestServer(9089, "api", "Server 3 after scale")
+	}
+	scaleUpChan <- func() (func() error, error) {
+		return httputil.CreateTestServer(9090, "api", "Server 4 after scale")
+	}
+
+	wipeCleanChan := make(chan func() error, 4)
+
+	t.Log("test prepare, create loadbalancer instance")
+	cert, err := os.ReadFile("server.crt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := os.ReadFile("server.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := os.ReadFile("ca.crt")
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+
+	// Create pool with the single host and add rest of the hosts during the
+	// requests coming concurrently
+	servicePool := ServicePool{
+		SvcIdentity:          "test",
+		SvcPort:              9094,
+		SvcRateQuotaTimes:    10,
+		SvcRateQuotaDuration: time.Second * 1,
+		SvcRoutes: []ServicePoolRoute{
+			ServicePoolRoute{
+				ServicePath:   "localhost:9087",
+				ServiceActive: true,
+			},
+			ServicePoolRoute{
+				ServicePath:   "localhost:9088",
+				ServiceActive: true,
+			},
+			ServicePoolRoute{
+				ServicePath:   "localhost:9089",
+				ServiceActive: true,
+			},
+			ServicePoolRoute{
+				ServicePath:   "localhost:9090",
+				ServiceActive: true,
+			},
+		},
+		Certificate:                string(cert),
+		CertKey:                    string(key),
+		CACert:                     string(ca),
+		SvcHealthCheckRescheduleMs: 1000,
+		SvcRouteTimeout:            time.Second * 1,
+	}
+
+	balancer, err := NewLoadBalancer(ctx, []ServicePool{servicePool}, Options{LogLevel: "info"})
+	if err != nil {
+		t.Fatal("cannot configure load balancer")
+	}
+
+	// Give 15 seconds for testing everything (a little more time here as additional reloads mid-scrjpt)
+	go func() {
+		<-time.After(time.Second * 20)
+		cancelAll()
+	}()
+
+	// Create senders
+	responses := make(chan string, 300)
+
+	// Start the test
+	// Strategy:
+	//   - start normal
+	//   - after some dispatch kill servers
+	//   - revive servers after a few moments altogether
+	//   - observe health check work for state restoration
+	//   - observe the requests before and after destroy/revive events
+	go func() {
+		// Give 5 seconds for everything to startup
+		<-time.After(time.Second * 5)
+		for i := 0; i < 300; i++ {
+
+			// Add some delay on batches to give servers time to catch up for situation
+			if i%10 == 0 {
+				<-time.After(time.Millisecond * 200)
+			}
+
+			// Each 20th request kill
+			if i%25 == 0 {
+				if state, exists := balancer.forwarderMap["test"]; exists {
+					var out []struct {
+						name    string
+						healthy bool
+					}
+					for _, rte := range *state.routes {
+						out = append(out, struct {
+							name    string
+							healthy bool
+						}{name: rte.address, healthy: rte.healthy.Load()})
+					}
+					t.Logf("routes state at i=%d: %+v", i, out)
+				}
+				<-time.After(time.Millisecond * 200)
+			}
+
+			// destroy servers after 50 requests dispatched
+			if i == 50 {
+				if len(windDownChan) > 0 {
+				destroy:
+					for {
+						select {
+						case canceler := <-windDownChan:
+							canceler()
+							t.Logf("upstream server shutdown")
+							break
+						default:
+							// No action... no need to wind down anything, just skipping
+							break destroy
+						}
+					}
+				}
+			}
+
+			// on 100th and following iteration try to restore servers during the load
+			if i > 100 && i%20 == 0 {
+				if len(scaleUpChan) > 0 {
+					select {
+					case restoreSvc := <-scaleUpChan:
+						canceler, err := restoreSvc()
+						if err != nil {
+							t.Errorf("server cannot come up")
+						}
+						t.Logf("server coming up")
+						wipeCleanChan <- canceler
+						break
+					default:
+						// No action... no need to wind down anything, just skipping
+					}
+				}
+			}
+
+			go func() {
+				// Test load balancer
+				res, err := httputil.SendTestRequest("https://localhost:9094/api")
+				if err != nil {
+					// t.Logf("cannot reach remotes, error: %+v", err)
+				}
+				responses <- res
+			}()
+		}
+	}()
+
+	// Listen for all threads
+	err = balancer.Listen()
+	if err != nil {
+		t.Errorf("listen returned error: %+v", err)
+	}
+
+run:
+	for {
+		select {
+		case closer := <-wipeCleanChan:
+			closer()
+		default:
+			break run
+		}
+	}
+
+	// Provide some stats
+	responded := [4]int{0, 0, 0, 0}
+	respondedAfterScaleUp := [4]int{0, 0, 0, 0}
+	for res := range responses {
+		if strings.Contains(res, "1") {
+			responded[0]++
+			if strings.Contains(res, "scale") {
+				respondedAfterScaleUp[0]++
+			}
+		} else if strings.Contains(res, "2") {
+			responded[1]++
+			if strings.Contains(res, "scale") {
+				respondedAfterScaleUp[1]++
+			}
+		} else if strings.Contains(res, "3") {
+			responded[2]++
+			if strings.Contains(res, "scale") {
+				respondedAfterScaleUp[2]++
+			}
+		} else if strings.Contains(res, "4") {
+			responded[3]++
+			if strings.Contains(res, "scale") {
+				respondedAfterScaleUp[3]++
+			}
+		}
+		if len(responses) == 0 {
+			break
+		}
+	}
+
+	if responded[0] == 0 || responded[1] == 0 || responded[2] == 0 || responded[3] == 0 {
+		t.Errorf("one of the servers was not selected by the strategy")
+	}
+	if respondedAfterScaleUp[0] == 0 || respondedAfterScaleUp[1] == 0 || respondedAfterScaleUp[2] == 0 || respondedAfterScaleUp[3] == 0 {
+		t.Errorf("one of the servers was not reinstantiated by the health-check service")
+	}
+	t.Logf("Servers responded total   1<%d times> 2<%d times> 3<%d times> 4<%d times>", responded[0], responded[1], responded[2], responded[3])
+	t.Logf("Servers after scale up    1<%d times> 2<%d times> 3<%d times> 4<%d times>", respondedAfterScaleUp[0], respondedAfterScaleUp[1], respondedAfterScaleUp[2], respondedAfterScaleUp[3])
+
+	// Let everything unwind gracefully
+	<-time.After(time.Second * 5)
+}
