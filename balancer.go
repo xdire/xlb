@@ -18,6 +18,8 @@ import (
 
 const (
 	defaultRequestPerSecondRate = 1000
+	defaultIPLRUCapacity        = 1000
+	defaultIPLRUBlockThreshold  = 10
 )
 
 // ServicePool structure that describes the unit of services
@@ -88,6 +90,8 @@ type Options struct {
 	Logger *zerolog.Logger
 	// Log level as trace,debug,info,error
 	LogLevel string
+	// Capacity of IP LRU cache to manage unauthorized requests limits
+	IpBlockListCapacity int
 }
 
 // LoadBalancer provides capability to accept the traffic and route it
@@ -100,6 +104,7 @@ type LoadBalancer struct {
 	poolMap      map[string]ServicePool
 	forwarderMap map[string]*Forwarder
 	mutex        sync.Mutex
+	ipLRU        *LRUCache
 }
 
 // NewLoadBalancer creates new instance of the load balancer
@@ -132,6 +137,11 @@ func NewLoadBalancer(ctx context.Context, cfgPool []ServicePool, opt Options) (*
 		poolMap[pool.Identity()] = pool
 	}
 
+	ipLRUCap := opt.IpBlockListCapacity
+	if ipLRUCap == 0 {
+		ipLRUCap = defaultIPLRUCapacity
+	}
+
 	derCtx, cancelFunc := context.WithCancel(ctx)
 	return &LoadBalancer{
 		id:           id.String(),
@@ -140,6 +150,7 @@ func NewLoadBalancer(ctx context.Context, cfgPool []ServicePool, opt Options) (*
 		logger:       logger,
 		forwarderMap: map[string]*Forwarder{},
 		poolMap:      poolMap,
+		ipLRU:        NewLRUCache(defaultIPLRUCapacity),
 	}, nil
 }
 
@@ -272,6 +283,23 @@ func (lb *LoadBalancer) Listen() error {
 					return
 				}
 
+				// Check if IP address connecting is in our cache and if it violated anything
+				if entry, ok := lb.ipLRU.Get(conn.RemoteAddr().String()); ok {
+					if entry.Count > defaultIPLRUBlockThreshold {
+						// If the entry exists and has not expired, block the connection
+						if entry.ExpiresAt.After(time.Now()) {
+							lb.logger.Trace().Msgf("rate quota exceeded for pool: %s", toSchedule.pool.Identity())
+							// TODO Provide notification pipeline abstraction where certain events can be dumped for behavior adjustments
+							// example: notify.Submit(IpBlockedNotification{identity,quota,time})
+							conn.Close()
+							continue
+						} else {
+							// Invalidate lazily
+							lb.ipLRU.Invalidate(conn.RemoteAddr().String())
+						}
+					}
+				}
+
 				lb.logger.Debug().Msgf("accepting request for port %d", toSchedule.port)
 
 				// Convert to TLS and proceed with the handshake
@@ -283,6 +311,8 @@ func (lb *LoadBalancer) Listen() error {
 					if err != nil {
 						lb.logger.Err(err).Msg("cannot close connection after failed handshake")
 					}
+					// Add address to IP LRU list and increment count of engagements
+					lb.ipLRU.IncrementCount(tlsConn.RemoteAddr().String(), 5*time.Minute)
 					continue
 				}
 
