@@ -32,6 +32,7 @@ type Forwarder struct {
 	strategy    leastConnection
 	logger      zerolog.Logger
 	dialTimeout time.Duration
+	health      *HealthCheckScheduler
 }
 
 // NewForwarder creates load balancer forwarder that can be used to
@@ -39,16 +40,30 @@ type Forwarder struct {
 // some features like: the least loaded server balancing, health check
 // routing, dynamic route update
 func NewForwarder(params ServicePool, logger zerolog.Logger) *Forwarder {
+	rescheduleTime := params.HealthCheckRescheduleMs()
+	if rescheduleTime == 0 {
+		rescheduleTime = 5000
+	}
 	fwd := &Forwarder{
 		routes: &[]*route{},
 		logger: logger,
+		health: NewHealthCheckScheduler(HealthSchedulerOptions{
+			MaxItems:        len(params.Routes()) * 2,
+			Logger:          logger,
+			ReleaseChecks:   params.HealthCheckValidations(),
+			CheckIntervalMs: rescheduleTime,
+			MaxWatchers:     len(params.Routes()),
+		}),
 	}
+	// Add strategy linking the forwarder
 	fwd.strategy = leastConnection{fwd}
+	// Default or provided timeout
 	dialTimeout := params.RouteTimeout()
 	if dialTimeout == 0 {
 		dialTimeout = time.Second * 30
 	}
 	fwd.dialTimeout = dialTimeout
+	// Assign routes
 	for _, rte := range params.Routes() {
 		if !rte.Active() {
 			continue
@@ -116,16 +131,28 @@ func (f *Forwarder) Attach(ctx context.Context, in io.ReadWriteCloser) error {
 	errTransport := make(chan error, 2)
 	defer in.Close()
 
-	rte := f.strategy.Next()
-	if rte == nil {
-		return fmt.Errorf("no active routes available")
+	var rte *route
+	var dest net.Conn
+	var err error
+
+	// Find next available route for satisfy connection request or fail finding nothing
+	for {
+		rte = f.strategy.Next()
+		// If no routes found, meaning all unhealthy or non-active then  provide error
+		if rte == nil {
+			return fmt.Errorf("no active routes available")
+		}
+
+		dest, err = net.DialTimeout("tcp", rte.address, f.dialTimeout)
+		if err != nil {
+			f.logger.Err(err).Msgf("route unreachable %s", rte.address)
+			f.health.AddUnhealthy(ctx, rte, f.dialTimeout)
+			continue
+		}
+		// Exit loop on first valid route
+		break
 	}
 
-	dest, err := net.DialTimeout("tcp", rte.address, f.dialTimeout)
-	if err != nil {
-		f.logger.Err(err).Msgf("route unreachable %s", rte.address)
-		return err
-	}
 	defer dest.Close()
 
 	// Connection increment here as we reached destination
@@ -195,6 +222,8 @@ func (lc leastConnection) Next() *route {
 	}
 	// @ManualTesting
 	// to observe the route to be dispatched in logs, uncomment following line
-	// fmt.Println(fmt.Sprintf("[FORWARDER][STRATEGY][TEST] route selected: %s %d", rte.address, rte.connections))
+	//if rte != nil {
+	//	fmt.Println(fmt.Sprintf("[FORWARDER][STRATEGY][TEST] route selected: %s %d %v", rte.address, rte.connections, rte.healthy.Load()))
+	//}
 	return rte
 }
